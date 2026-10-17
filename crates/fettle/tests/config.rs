@@ -347,6 +347,16 @@ fn callback_state_resets_after_a_failure() {
 }
 
 #[test]
+fn host_from_another_config_is_rejected() {
+    let (_one_dir, one) = config("import { host } from \"fettle\";\nhost(\"nas\", () => {});\n");
+    let (_two_dir, two) = config(
+        "import { host } from \"fettle\";\nhost(\"nas\", () => {});\nhost(\"pi\", () => {});\n",
+    );
+    let error = one.catalog(&two.hosts()[1], &debian()).unwrap_err();
+    assert_mentions(&error, &["\"pi\"", "not registered"]);
+}
+
+#[test]
 fn role_as_a_plain_function() {
     let catalog = catalog_of(
         r#"import { host, pkg } from "fettle";

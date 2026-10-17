@@ -25,6 +25,8 @@ const STATE_GLOBAL: &str = "__fettle";
 ///
 /// Not `Send`: build catalogs on the thread that loaded the config.
 pub struct Config {
+    // Invariant: `hosts[i].index == i`, and `callbacks[i]` and `host_stacks[i]` belong to
+    // `hosts[i]`.
     hosts: Vec<Host>,
     callbacks: Vec<Persistent<Function<'static>>>,
     host_stacks: Vec<String>,
@@ -155,9 +157,20 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// Fails when the callback throws, returns a thenable, declares an invalid resource or
-    /// declares two different resources with the same identity.
+    /// Fails when `host` is not one of [`Config::hosts`], or the callback throws, returns a
+    /// thenable, declares an invalid resource or declares two different resources with the same
+    /// identity.
     pub fn catalog(&self, host: &Host, facts: &Facts) -> Result<Catalog, Error> {
+        if self
+            .hosts
+            .get(host.index)
+            .is_none_or(|registered| registered.name != host.name)
+        {
+            return Err(Error::new(
+                None,
+                format!("host \"{}\" is not registered by this config", host.name),
+            ));
+        }
         let js = Js {
             file: &self.file,
             module: &self.module,
