@@ -265,3 +265,17 @@ fn message_unknown_is_rejected() {
 
     assert!(error.to_string().contains("shutdown"), "{error}");
 }
+
+#[test]
+fn message_with_a_newline_in_a_string_is_one_line() {
+    let message = CliMessage::Catalog(vec![Resource {
+        id: "/etc/motd".into(),
+        desired: Desired::File(File::Present {
+            content: "a\nb".into(),
+        }),
+    }]);
+    let line = serde_json::to_string(&message).unwrap();
+
+    assert!(!line.contains('\n'), "{line}");
+    assert_eq!(serde_json::from_str::<CliMessage>(&line).unwrap(), message);
+}

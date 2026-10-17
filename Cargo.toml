@@ -16,6 +16,9 @@ oxc = { version = "0.154", features = ["transformer", "codegen", "semantic"] }
 rquickjs = { version = "0.14", features = ["loader"] }
 serde_path_to_error = "0.1"
 tempfile = "3"
+openssh = "0.11"
+tokio = { version = "1", features = ["io-util", "macros", "rt"] }
+sha2 = "0.11"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
