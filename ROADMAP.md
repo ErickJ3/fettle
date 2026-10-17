@@ -15,20 +15,23 @@ This roadmap describes the direction of fettle, not commitments: scope and order
 
 Goal: the full cycle on a single host: declare, plan, apply and remove.
 
-- [ ] Evaluate `fettle.ts` locally into a catalog
-- [ ] Static agent for Linux amd64 and arm64, shipped over SSH
+- [ ] Evaluate `fettle.ts` locally: host registration, `ssh` defaulting to the host name, and host callbacks run with the host's facts
+- [ ] Validated catalog: prop validation with source locations, identity by kind and id, duplicate merging, and `read()`
+- [ ] Static agent for Linux amd64 and arm64, shipped over SSH, reporting facts
 - [ ] Resources: `pkg` (apt), `file`, `service` (systemd) and `user`
-- [ ] `fettle plan` and `fettle apply`, with state kept on the host
-- [ ] Resources removed from the config are removed from the machine
+- [ ] `fettle plan` and `fettle apply`, with writes in source order, a failed write stopping the host, and state kept on the host
+- [ ] Resources fettle created are removed when dropped from the config, pre-existing ones are forgotten, and `absent: true` removes either
 
 ## v0.2 - Multi-host orchestration
 
-Goal: configure several hosts in parallel, with resources ordered by a dependency graph.
+Goal: configure several hosts in parallel, with parallel reads and service triggers.
 
-- [ ] Parallel runs across hosts, and host groups
-- [ ] Parallel execution along the dependency graph
-- [ ] Restarts triggered by changes (`restartOn`)
-- [ ] Resources: `template`, `exec` with guards, `docker.engine` and `docker.compose`
+- [ ] Parallel runs across hosts, selected by name or `tags`
+- [ ] Parallel reads in the agent
+- [ ] Restarts and reloads triggered by changes (`restartOn`, `reloadOn`)
+- [ ] Helpers: `template()` and `local()`
+- [ ] Resources: `exec` with guards and `docker.compose`
+- [ ] Standard library: `docker.engine()`
 - [ ] Drift detection (`fettle drift`)
 
 ## v0.3 - Testing, secrets and extensibility

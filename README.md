@@ -3,33 +3,30 @@
 Declarative configuration for Linux machines: see the diff, apply only the difference, undo what you remove.
 
 > [!WARNING]
-> fettle is pre-alpha and not usable yet. The example below shows the target syntax; `restartOn` and `docker.*` arrive in v0.2. See the [roadmap](ROADMAP.md).
+> fettle is pre-alpha and not usable yet. The example below shows the target syntax; `reloadOn`, `template`, `local` and `docker.*` arrive in v0.2. See the [roadmap](ROADMAP.md).
 
 ## Why
 
-You describe each machine in typed TypeScript. fettle reads its real state, shows exactly what will change and applies only that. Remove a package or file from the config and the next run removes it from the machine. Think of it as Terraform for the inside of the machine.
+You describe each machine in typed TypeScript. fettle reads its real state, shows exactly what will change and applies only that. Remove a package or file that fettle put there from the config and the next run removes it from the machine. Think of it as Terraform for the inside of the machine.
 
 fettle is for anyone who runs long-lived Linux servers, from a company's production hosts to a single VPS or a homelab. It configures ordinary Debian, Ubuntu or Fedora machines declaratively, with fast runs and predictable results, without switching operating systems or adopting a whole platform.
 
 ## Example
 
 ```ts
-import { host, pkg, file, service, user, docker } from "fettle";
+import { host, pkg, file, service, user, docker, read, template, local } from "fettle";
 
-export default host("nas", { ssh: "root@192.168.1.10" }, () => {
-  user("marcos", { groups: ["docker"], sshKeys: ["~/.ssh/id_ed25519.pub"] });
+host("nas", { ssh: "root@192.168.1.10" }, () => {
+  docker.engine();
+  user("marcos", { groups: ["docker"], sshKeys: [read("~/.ssh/id_ed25519.pub")] });
 
   pkg(["htop", "tmux", "caddy"]);
-  docker.engine();
-
   const caddyfile = file("/etc/caddy/Caddyfile", {
-    template: "./caddy/Caddyfile",
-    vars: { domain: "casa.lan" },
+    content: template("./caddy/Caddyfile", { domain: "casa.lan" }),
   });
+  service("caddy", { enabled: true, reloadOn: [caddyfile] });
 
-  service("caddy", { enabled: true, restartOn: [caddyfile] });
-
-  docker.compose("immich", { source: "./stacks/immich" });
+  docker.compose("immich", { source: local("./stacks/immich") });
 });
 ```
 
@@ -38,7 +35,7 @@ $ fettle plan
 nas (192.168.1.10)
   + pkg       caddy
   ~ file      /etc/caddy/Caddyfile   (+2 −1 lines)
-  ↻ service   caddy                  (restart: Caddyfile changed)
+  ↻ service   caddy                  (reload: Caddyfile changed)
   - pkg       nginx                  (removed from config)
 
 3 changes, 1 removal. Run `fettle apply` to apply.
@@ -46,10 +43,11 @@ nas (192.168.1.10)
 
 ## How it works
 
-1. fettle evaluates `fettle.ts` on your machine into a catalog of desired resources. Your code never runs on the target.
+1. fettle evaluates `fettle.ts` on your machine to find the hosts. Your code never runs on the target.
 2. It opens one SSH connection per host and starts a short-lived static agent. Nothing needs to be installed on the target besides SSH.
-3. The agent reads the real state and compares it with the catalog and with what fettle managed before. `fettle plan` stops here.
-4. `fettle apply` applies only the difference and records what it manages in `/var/lib/fettle/state.json` on the host.
+3. The agent reports the host's facts (distribution, architecture, hostname), and fettle runs that host's callback with them to build its catalog of desired resources.
+4. The agent reads the real state and compares it with the catalog and with what fettle managed before. `fettle plan` stops here.
+5. `fettle apply` applies only the difference, one resource at a time in the order of `fettle.ts`, and records what it manages in `/var/lib/fettle/state.json` on the host.
 
 ## Coming from Ansible?
 
