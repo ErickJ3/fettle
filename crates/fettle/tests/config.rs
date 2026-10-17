@@ -336,6 +336,16 @@ host("nas", () => {
 }
 
 #[test]
+fn thrown_string_in_a_host_callback_points_at_the_host() {
+    let error = catalog_error(
+        "import { host } from \"fettle\";\n\nhost(\"nas\", () => {\n  throw \"boom\";\n});\n",
+        "nas",
+    );
+    assert_at(&error, 3);
+    assert_mentions(&error, &["\"nas\"", "\"boom\""]);
+}
+
+#[test]
 fn exception_in_a_function_whose_name_has_parentheses() {
     let error = catalog_error(
         r#"import { host, pkg } from "fettle";

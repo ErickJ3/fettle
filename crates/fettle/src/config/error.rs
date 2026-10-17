@@ -17,7 +17,8 @@ impl fmt::Display for Location {
     }
 }
 
-/// An evaluation failure; `location` is `None` only when no line of `fettle.ts` caused it.
+/// An evaluation failure; `location` is `None` when no line of `fettle.ts` caused it, or when
+/// the top level throws a value that is not an `Error` or awaits a promise that never settles.
 ///
 /// `message` leaves out the [`source`](std::error::Error::source), so report the whole chain.
 #[derive(Debug, Clone)]

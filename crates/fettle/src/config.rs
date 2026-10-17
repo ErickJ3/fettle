@@ -99,6 +99,14 @@ impl Js<'_> {
             CaughtError::Error(error) => engine_error(error),
         }
     }
+
+    /// Like [`Js::caught`], falling back to the declaration at `stack` for a throw that has no
+    /// location of its own, such as a thrown string or one from `JSON.stringify` itself.
+    fn caught_at(&self, caught: CaughtError<'_>, stack: &str) -> Error {
+        let mut error = self.caught(caught);
+        error.location = error.location.or_else(|| self.location(stack));
+        error
+    }
 }
 
 impl Config {
@@ -255,7 +263,7 @@ impl Config {
         callback
             .call::<_, Value>((facts,))
             .catch(ctx)
-            .map_err(|e| js.caught(e))
+            .map_err(|e| js.caught_at(e, &self.host_stacks[host.index]))
     }
 }
 
@@ -412,13 +420,7 @@ fn to_json<'js>(
     let json = match ctx.json_stringify(value).catch(ctx) {
         Ok(Some(json)) => json.to_string().map_err(engine_error)?,
         Ok(None) => return Ok(serde_json::Value::Null),
-        // A throw from user code, such as a `toJSON`, has its own location; one from
-        // `JSON.stringify` itself, such as on a BigInt, has none, so it points at the declaration.
-        Err(caught) => {
-            let mut error = js.caught(caught);
-            error.location = error.location.or_else(|| js.location(stack));
-            return Err(error);
-        }
+        Err(caught) => return Err(js.caught_at(caught, stack)),
     };
     serde_json::from_str(&json).map_err(|e| {
         Error::new(ErrorKind::Engine, None, "the engine produced invalid JSON").caused_by(e)
