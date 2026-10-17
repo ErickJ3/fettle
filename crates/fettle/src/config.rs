@@ -87,7 +87,9 @@ impl Config {
     ///
     /// Fails when the file cannot be read, has a syntax error, imports a module other than
     /// `"fettle"`, throws at the top level, never finishes, or registers an invalid host.
-    pub fn load(path: &Path) -> Result<Self, Error> {
+    pub fn load(path: impl Into<PathBuf>) -> Result<Self, Error> {
+        let file = path.into();
+        let path = file.as_path();
         let source = std::fs::read_to_string(path)
             .map_err(|e| Error::new(None, format!("cannot read {}: {e}", path.display())))?;
         let script = script::strip(path, &source)?;
@@ -140,7 +142,7 @@ impl Config {
             callbacks,
             host_stacks,
             state,
-            file: path.to_path_buf(),
+            file,
             module,
             map: script.map,
             context,
