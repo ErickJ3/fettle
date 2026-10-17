@@ -60,15 +60,16 @@ impl Session {
     ///
     /// Fails when ssh cannot connect, the host's architecture has no bundled agent, the upload
     /// fails, or the agent's first message is not its facts.
-    pub async fn connect(destination: &str) -> Result<(Session, Facts), Error> {
+    pub async fn connect(destination: impl Into<String>) -> Result<(Session, Facts), Error> {
+        let destination = destination.into();
         let fail = |message: String| Error {
-            destination: destination.to_owned(),
+            destination: destination.clone(),
             message,
         };
         let ssh = SessionBuilder::default()
             .control_persist(ControlPersist::IdleFor(CONTROL_PERSIST_SECONDS))
             .connect_timeout(CONNECT_TIMEOUT)
-            .connect(destination)
+            .connect(&destination)
             .await
             .map_err(|e| fail(chain(&e)))?;
         let ssh = Arc::new(ssh);
@@ -92,7 +93,7 @@ impl Session {
 
         let (agent, stdin, stdout) = start(&ssh, &path).await.map_err(|e| fail(chain(&e)))?;
         let mut session = Session {
-            destination: destination.to_owned(),
+            destination,
             ssh,
             agent,
             stdin,
