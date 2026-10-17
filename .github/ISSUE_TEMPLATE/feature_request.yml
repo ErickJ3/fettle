@@ -1,0 +1,27 @@
+name: Feature request
+description: Propose new behavior for fettle.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what gets in the way today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: What fettle should do, ideally with a `fettle.ts` example and the expected plan.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: input
+    id: design
+    attributes:
+      label: Related design section
+      description: Link to the section of docs/design.md this touches, if any.
