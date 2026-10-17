@@ -118,9 +118,12 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// Fails when the file cannot be read, has a syntax error, imports a module other than
-    /// `"fettle"` or uses `import()`, throws at the top level, never finishes, or registers an
-    /// invalid host.
+    /// - [`ErrorKind::Io`]: the file cannot be read or resolved.
+    /// - [`ErrorKind::Syntax`]: it is not valid TypeScript, imports a module other than
+    ///   `"fettle"` or uses `import()`.
+    /// - [`ErrorKind::Script`]: it throws at the top level, never finishes, or registers an
+    ///   invalid host.
+    /// - [`ErrorKind::Engine`]: the JavaScript engine fails.
     pub fn load(path: impl Into<PathBuf>) -> Result<Self, Error> {
         let file = path.into();
         let path = file.as_path();
@@ -205,9 +208,10 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// Fails when `host` is not one of [`Config::hosts`], or the callback throws, returns a
-    /// thenable, declares an invalid resource or declares two different resources with the same
-    /// identity.
+    /// - [`ErrorKind::UnknownHost`]: `host` is not one of [`Config::hosts`].
+    /// - [`ErrorKind::Script`]: the callback throws, returns a thenable, declares an invalid
+    ///   resource or declares two different resources with the same identity.
+    /// - [`ErrorKind::Engine`]: the JavaScript engine fails.
     pub fn catalog(&self, host: &Host, facts: &Facts) -> Result<Catalog, Error> {
         let registration = self.registration(host)?;
         let js = Js {
