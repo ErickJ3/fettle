@@ -226,7 +226,10 @@ impl Config {
                 state
                     .set("current", Value::new_null(ctx.clone()))
                     .map_err(engine_error)?;
-                if is_thenable(&returned?) {
+                let thenable = is_thenable(&returned?)
+                    .catch(&ctx)
+                    .map_err(|e| js.caught_at(e, &registration.stack))?;
+                if thenable {
                     return Err(Error::new(
                         ErrorKind::Script,
                         js.location(&registration.stack),
@@ -358,12 +361,15 @@ fn build_catalog<'js>(
         let entry = entry.map_err(engine_error)?;
         let kind: String = entry.get(0).map_err(engine_error)?;
         let stack: String = entry.get(3).map_err(engine_error)?;
-        let ids = ids(&entry.get(1).map_err(engine_error)?).ok_or_else(|| {
-            js.error(
-                &stack,
-                format!("{kind}: the id must be a non-empty string or a list of them"),
-            )
-        })?;
+        let ids = ids(&entry.get(1).map_err(engine_error)?)
+            .catch(ctx)
+            .map_err(|e| js.caught_at(e, &stack))?
+            .ok_or_else(|| {
+                js.error(
+                    &stack,
+                    format!("{kind}: the id must be a non-empty string or a list of them"),
+                )
+            })?;
         let props = to_json(ctx, js, &stack, entry.get(2).map_err(engine_error)?)
             .map_err(|e| e.prefixed(&kind))?;
         for id in ids {
@@ -395,22 +401,19 @@ fn build_catalog<'js>(
 }
 
 /// A non-empty string is one id and a list of them is each; anything else is `None`.
-fn ids(value: &Value<'_>) -> Option<Vec<String>> {
+fn ids(value: &Value<'_>) -> rquickjs::Result<Option<Vec<String>>> {
     match value.as_array() {
-        Some(list) => list
-            .iter::<Value>()
-            .map(|id| id.ok().as_ref().and_then(id_string))
-            .collect(),
-        None => id_string(value).map(|id| vec![id]),
+        Some(list) => list.iter::<Value>().map(|id| id_string(&id?)).collect(),
+        None => Ok(id_string(value)?.map(|id| vec![id])),
     }
 }
 
-fn id_string(value: &Value<'_>) -> Option<String> {
-    value
-        .as_string()?
-        .to_string()
-        .ok()
-        .filter(|id| !id.is_empty())
+fn id_string(value: &Value<'_>) -> rquickjs::Result<Option<String>> {
+    let id = value
+        .as_string()
+        .map(rquickjs::String::to_string)
+        .transpose()?;
+    Ok(id.filter(|id| !id.is_empty()))
 }
 
 /// Converts the options or props of the declaration at `stack`, `undefined` meaning none.
@@ -456,11 +459,11 @@ fn describe(value: &Value<'_>) -> String {
         .map_or_else(|| format!("{:?}", value.type_of()), |s| format!("\"{s}\""))
 }
 
-fn is_thenable(value: &Value<'_>) -> bool {
-    value
-        .as_object()
-        .and_then(|object| object.get::<_, Value>("then").ok())
-        .is_some_and(|then| then.is_function())
+fn is_thenable(value: &Value<'_>) -> rquickjs::Result<bool> {
+    match value.as_object() {
+        Some(object) => Ok(object.get::<_, Value>("then")?.is_function()),
+        None => Ok(false),
+    }
 }
 
 fn engine_error(error: rquickjs::Error) -> Error {

@@ -491,6 +491,22 @@ fn id_that_is_not_a_string() {
 }
 
 #[test]
+fn throwing_then_getter_keeps_its_exception() {
+    let error = catalog_error(
+        r#"import { host } from "fettle";
+host("nas", () => ({
+  get then() {
+    throw new Error("then exploded");
+  },
+}));
+"#,
+        "nas",
+    );
+    assert_at(&error, 4);
+    assert_mentions(&error, &["then exploded"]);
+}
+
+#[test]
 fn two_roles_need_the_same_package() {
     let catalog = catalog_of(
         r#"import { host, pkg } from "fettle";
