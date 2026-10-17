@@ -402,6 +402,18 @@ fn host_from_another_config_is_rejected() {
 }
 
 #[test]
+fn host_of_the_same_name_from_another_config_is_rejected() {
+    let (_one_dir, one) = config(
+        "import { host, pkg } from \"fettle\";\nhost(\"nas\", { ssh: \"root@a\" }, () => pkg(\"a\"));\n",
+    );
+    let (_two_dir, two) = config(
+        "import { host, pkg } from \"fettle\";\nhost(\"nas\", { ssh: \"root@b\" }, () => pkg(\"b\"));\n",
+    );
+    let error = one.catalog(&two.hosts()[0], &debian()).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::UnknownHost);
+}
+
+#[test]
 fn missing_file_keeps_the_io_error() {
     let dir = TempDir::new().unwrap();
     let Err(error) = Config::load(dir.path().join("fettle.ts")) else {

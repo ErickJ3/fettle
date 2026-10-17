@@ -201,7 +201,7 @@ impl Config {
         if self
             .hosts
             .get(host.index)
-            .is_none_or(|registered| registered.name != host.name)
+            .is_none_or(|registered| registered != host)
         {
             return Err(Error::new(
                 ErrorKind::UnknownHost,
