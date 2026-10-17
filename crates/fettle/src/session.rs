@@ -4,6 +4,7 @@ use std::fmt;
 use std::num::NonZeroUsize;
 use std::process::Output;
 use std::sync::Arc;
+use std::time::Duration;
 
 use fettle_protocol::{AgentMessage, CliMessage, Facts};
 use openssh::{ChildStdin, ChildStdout, ControlPersist, OwningCommand, SessionBuilder, Stdio};
@@ -23,6 +24,10 @@ const BUNDLED: [(&str, Option<Agent>); 2] = [("x86_64", X86_64), ("aarch64", AAR
 /// Covers the gaps between the sequential commands of `connect` and stops the master soon after
 /// a CLI that was killed outright leaves it without clients.
 const CONTROL_PERSIST_SECONDS: NonZeroUsize = NonZeroUsize::new(5).unwrap();
+
+/// Fails an unreachable host instead of waiting out the OS TCP timeout, which can take minutes;
+/// the value is a guess generous enough for slow links.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A failure on one host.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +67,7 @@ impl Session {
         };
         let ssh = SessionBuilder::default()
             .control_persist(ControlPersist::IdleFor(CONTROL_PERSIST_SECONDS))
+            .connect_timeout(CONNECT_TIMEOUT)
             .connect(destination)
             .await
             .map_err(|e| fail(chain(&e)))?;
