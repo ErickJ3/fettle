@@ -98,7 +98,7 @@ fn location(path: &Path, source: &str, offset: u32) -> Location {
     Location {
         file: path.to_path_buf(),
         line: count(before.matches('\n').count()) + 1,
-        column: count(before[line_start..].chars().count()) + 1,
+        column: count(before[line_start..].encode_utf16().count()) + 1,
     }
 }
 
@@ -155,5 +155,13 @@ mod tests {
             .unwrap();
         assert!(error.message.contains("./roles"), "{error}");
         assert_eq!(error.location.unwrap().line, 2);
+    }
+
+    #[test]
+    fn syntax_error_column_counts_utf16_units() {
+        let error = strip_source("const s = \"😀\"; const = 1;\n")
+            .err()
+            .unwrap();
+        assert_eq!(error.location.unwrap().column, 23);
     }
 }

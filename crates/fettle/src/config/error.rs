@@ -2,7 +2,8 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// A position in `fettle.ts`, one-based.
+/// A position in `fettle.ts`, one-based, with the column in UTF-16 code units as TypeScript
+/// tools count it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Location {
     pub file: PathBuf,

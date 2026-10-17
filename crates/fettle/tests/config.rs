@@ -353,6 +353,15 @@ host("nas", () => {
 }
 
 #[test]
+fn runtime_error_column_counts_utf16_units() {
+    let error = catalog_error(
+        "import { host, service } from \"fettle\";\nhost(\"nas\", () => {\n  const s = \"😀😀\"; service(\"a\", { enabled: 1 } as any);\n});\n",
+        "nas",
+    );
+    assert_eq!(error.location().unwrap().column, 21, "{error}");
+}
+
+#[test]
 fn resource_at_top_level() {
     let error = load_error("import { pkg } from \"fettle\";\n\npkg(\"htop\");\n");
     assert_at(&error, 3);
