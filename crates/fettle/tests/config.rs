@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use fettle::config::{Config, Error};
+use fettle::config::{Config, Error, ErrorKind};
 use fettle_protocol::{Catalog, Desired, Facts, Os, Pkg, Resource, Service, User};
 use tempfile::TempDir;
 
@@ -79,8 +79,7 @@ fn pkg(id: &str) -> Resource {
 #[track_caller]
 fn assert_at(error: &Error, line: u32) {
     let location = error
-        .location
-        .as_ref()
+        .location()
         .unwrap_or_else(|| panic!("no location: {error}"));
     assert_eq!(location.file.file_name().unwrap(), "fettle.ts", "{error}");
     assert_eq!(location.line, line, "{error}");
@@ -372,7 +371,21 @@ fn host_from_another_config_is_rejected() {
         "import { host } from \"fettle\";\nhost(\"nas\", () => {});\nhost(\"pi\", () => {});\n",
     );
     let error = one.catalog(&two.hosts()[1], &debian()).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::UnknownHost);
     assert_mentions(&error, &["\"pi\"", "not registered"]);
+}
+
+#[test]
+fn missing_file_keeps_the_io_error() {
+    let dir = TempDir::new().unwrap();
+    let Err(error) = Config::load(dir.path().join("fettle.ts")) else {
+        panic!("load should fail");
+    };
+    assert_eq!(error.kind(), ErrorKind::Io);
+    let io = std::error::Error::source(&error)
+        .and_then(|source| source.downcast_ref::<std::io::Error>())
+        .expect("an io::Error source");
+    assert_eq!(io.kind(), std::io::ErrorKind::NotFound);
 }
 
 #[test]

@@ -8,7 +8,7 @@ use oxc::semantic::SemanticBuilder;
 use oxc::span::{LabeledSpan, SourceType};
 use oxc::transformer::{TransformOptions, Transformer};
 
-use super::error::{Error, Location, SourceMap};
+use super::error::{Error, ErrorKind, Location, SourceMap};
 
 /// The only module `fettle.ts` can import.
 pub(crate) const FETTLE_MODULE: &str = "fettle";
@@ -35,6 +35,7 @@ pub(crate) fn strip(path: &Path, source: &str) -> Result<Script, Error> {
         .min_by_key(|(_, offset)| *offset)
     {
         return Err(Error::new(
+            ErrorKind::Syntax,
             at(offset),
             format!("cannot import \"{specifier}\": fettle.ts can only import \"{FETTLE_MODULE}\""),
         ));
@@ -88,7 +89,7 @@ fn diagnostic_error(path: &Path, source: &str, diagnostic: &OxcDiagnostic) -> Er
         .map(LabeledSpan::offset)
         .min()
         .map(|offset| location(path, source, offset));
-    Error::new(location, diagnostic.message.to_string())
+    Error::new(ErrorKind::Syntax, location, diagnostic.message.to_string())
 }
 
 fn location(path: &Path, source: &str, offset: u32) -> Location {

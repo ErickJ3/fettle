@@ -14,7 +14,7 @@ use rquickjs::{
 };
 use serde::Deserialize;
 
-pub use error::{Error, Location};
+pub use error::{Error, ErrorKind, Location};
 use error::{SourceMap, locate};
 use script::FETTLE_MODULE;
 
@@ -65,7 +65,7 @@ impl Js<'_> {
     }
 
     fn error(&self, stack: &str, message: impl Into<String>) -> Error {
-        Error::new(self.location(stack), message)
+        Error::new(ErrorKind::Script, self.location(stack), message)
     }
 
     fn caught(&self, caught: CaughtError<'_>) -> Error {
@@ -74,8 +74,12 @@ impl Js<'_> {
                 &exception.stack().unwrap_or_default(),
                 exception.message().unwrap_or_default(),
             ),
-            CaughtError::Value(value) => Error::new(None, format!("uncaught {}", describe(&value))),
-            CaughtError::Error(error) => Error::new(None, error.to_string()),
+            CaughtError::Value(value) => Error::new(
+                ErrorKind::Script,
+                None,
+                format!("uncaught {}", describe(&value)),
+            ),
+            CaughtError::Error(error) => engine_error(error),
         }
     }
 }
@@ -90,11 +94,24 @@ impl Config {
     pub fn load(path: impl Into<PathBuf>) -> Result<Self, Error> {
         let file = path.into();
         let path = file.as_path();
-        let source = std::fs::read_to_string(path)
-            .map_err(|e| Error::new(None, format!("cannot read {}: {e}", path.display())))?;
+        let source = std::fs::read_to_string(path).map_err(|e| {
+            Error::new(
+                ErrorKind::Io,
+                None,
+                format!("cannot read {}", path.display()),
+            )
+            .caused_by(e)
+        })?;
         let script = script::strip(path, &source)?;
         let module = std::fs::canonicalize(path)
-            .map_err(|e| Error::new(None, format!("cannot resolve {}: {e}", path.display())))?
+            .map_err(|e| {
+                Error::new(
+                    ErrorKind::Io,
+                    None,
+                    format!("cannot resolve {}", path.display()),
+                )
+                .caused_by(e)
+            })?
             .to_string_lossy()
             .into_owned();
         let base = path.parent().unwrap_or(Path::new("")).to_path_buf();
@@ -123,6 +140,7 @@ impl Config {
                 Ok(()) => {}
                 Err(CaughtError::Error(rquickjs::Error::WouldBlock)) => {
                     return Err(Error::new(
+                        ErrorKind::Script,
                         None,
                         format!(
                             "{}: evaluation never finishes: a top-level await never settles",
@@ -169,6 +187,7 @@ impl Config {
             .is_none_or(|registered| registered.name != host.name)
         {
             return Err(Error::new(
+                ErrorKind::UnknownHost,
                 None,
                 format!("host \"{}\" is not registered by this config", host.name),
             ));
@@ -191,16 +210,14 @@ impl Config {
                     .map_err(engine_error)?;
                 if is_thenable(&returned?) {
                     return Err(Error::new(
+                        ErrorKind::Script,
                         js.location(&self.host_stacks[host.index]),
                         "the callback must be synchronous, but it returned a promise",
                     ));
                 }
                 build_catalog(&ctx, &js, &declared)
             })
-            .map_err(|e| Error {
-                message: format!("host \"{}\": {}", host.name, e.message),
-                ..e
-            })
+            .map_err(|e| e.prefixed(&format!("host \"{}\"", host.name)))
     }
 
     fn run_callback<'js>(
@@ -214,7 +231,9 @@ impl Config {
             .clone()
             .restore(ctx)
             .map_err(engine_error)?;
-        let facts = serde_json::to_string(facts).map_err(|e| Error::new(None, e.to_string()))?;
+        let facts = serde_json::to_string(facts).map_err(|e| {
+            Error::new(ErrorKind::Engine, None, "cannot convert the facts to JSON").caused_by(e)
+        })?;
         let facts = ctx.json_parse(facts).map_err(engine_error)?;
         callback
             .call::<_, Value>((facts,))
@@ -272,11 +291,8 @@ fn register_hosts<'js>(
             .map_err(engine_error)?
             .into_function()
             .ok_or_else(|| js.error(&stack, format!("host \"{name}\" needs a callback")))?;
-        let options =
-            to_json(ctx, js, &stack, entry.get(1).map_err(engine_error)?).map_err(|e| Error {
-                message: format!("host \"{name}\": {}", e.message),
-                ..e
-            })?;
+        let options = to_json(ctx, js, &stack, entry.get(1).map_err(engine_error)?)
+            .map_err(|e| e.prefixed(&format!("host \"{name}\"")))?;
         let options: HostOptions = serde_path_to_error::deserialize(options)
             .map_err(|e| js.error(&stack, format!("host \"{name}\": {}", field_error(&e))))?;
         if let Some(first) = hosts.iter().position(|h: &Host| h.name == name) {
@@ -317,11 +333,8 @@ fn build_catalog<'js>(
                 format!("{kind}: the id must be a non-empty string or a list of them"),
             )
         })?;
-        let props =
-            to_json(ctx, js, &stack, entry.get(2).map_err(engine_error)?).map_err(|e| Error {
-                message: format!("{kind}: {}", e.message),
-                ..e
-            })?;
+        let props = to_json(ctx, js, &stack, entry.get(2).map_err(engine_error)?)
+            .map_err(|e| e.prefixed(&kind))?;
         for id in ids {
             let desired: Desired = serde_path_to_error::deserialize(
                 serde_json::json!({ "kind": kind, "props": props }),
@@ -385,14 +398,14 @@ fn to_json<'js>(
         // A throw from user code, such as a `toJSON`, has its own location; one from
         // `JSON.stringify` itself, such as on a BigInt, has none, so it points at the declaration.
         Err(caught) => {
-            let error = js.caught(caught);
-            return Err(Error {
-                location: error.location.or_else(|| js.location(stack)),
-                ..error
-            });
+            let mut error = js.caught(caught);
+            error.location = error.location.or_else(|| js.location(stack));
+            return Err(error);
         }
     };
-    serde_json::from_str(&json).map_err(|e| Error::new(None, e.to_string()))
+    serde_json::from_str(&json).map_err(|e| {
+        Error::new(ErrorKind::Engine, None, "the engine produced invalid JSON").caused_by(e)
+    })
 }
 
 /// Names the failing field without the `props.` prefix of a resource declaration.
@@ -425,7 +438,6 @@ fn is_thenable(value: &Value<'_>) -> bool {
         .is_some_and(|then| then.is_function())
 }
 
-#[expect(clippy::needless_pass_by_value, reason = "passed to `map_err`")]
 fn engine_error(error: rquickjs::Error) -> Error {
-    Error::new(None, format!("JavaScript engine error: {error}"))
+    Error::new(ErrorKind::Engine, None, "JavaScript engine error").caused_by(error)
 }

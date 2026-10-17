@@ -1,5 +1,6 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// A position in `fettle.ts`, one-based.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,17 +17,71 @@ impl fmt::Display for Location {
 }
 
 /// An evaluation failure; `location` is `None` only when no line of `fettle.ts` caused it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `message` leaves out the [`source`](std::error::Error::source), so report the whole chain.
+#[derive(Debug, Clone)]
 pub struct Error {
-    pub location: Option<Location>,
-    pub message: String,
+    pub(crate) kind: ErrorKind,
+    pub(crate) location: Option<Location>,
+    pub(crate) message: String,
+    source: Option<Arc<dyn std::error::Error + Send + Sync>>,
+}
+
+/// What failed, for callers that handle failures differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorKind {
+    /// `fettle.ts` could not be read.
+    Io,
+    /// `fettle.ts` is not valid TypeScript or imports a module other than `"fettle"`.
+    Syntax,
+    /// The code threw, never finished, or declared an invalid host or resource.
+    Script,
+    /// [`Config::catalog`](super::Config::catalog) was given a host of another config.
+    UnknownHost,
+    /// The JavaScript engine failed, or a value could not cross between it and Rust.
+    Engine,
 }
 
 impl Error {
-    pub(crate) fn new(location: Option<Location>, message: impl Into<String>) -> Self {
+    #[must_use]
+    pub fn kind(&self) -> ErrorKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub fn location(&self) -> Option<&Location> {
+        self.location.as_ref()
+    }
+
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub(crate) fn new(
+        kind: ErrorKind,
+        location: Option<Location>,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
+            kind,
             location,
             message: message.into(),
+            source: None,
+        }
+    }
+
+    pub(crate) fn caused_by(self, source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self {
+            source: Some(Arc::new(source)),
+            ..self
+        }
+    }
+
+    pub(crate) fn prefixed(self, prefix: &str) -> Self {
+        Self {
+            message: format!("{prefix}: {}", self.message),
+            ..self
         }
     }
 }
@@ -40,7 +95,13 @@ impl fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {}
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source
+            .as_deref()
+            .map(|source| source as &(dyn std::error::Error + 'static))
+    }
+}
 
 /// Maps positions in the stripped JavaScript back to `fettle.ts`.
 #[derive(Debug, Default)]
