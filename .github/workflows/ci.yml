@@ -44,3 +44,47 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+
+  agent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-zigbuild@0.23.4
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: arm64
+      - name: Build
+        run: |
+          cargo zigbuild -p fettle-agent --release --locked --target x86_64-unknown-linux-musl
+          cargo zigbuild -p fettle-agent --release --locked --target aarch64-unknown-linux-musl
+      - name: Check static linking
+        run: |
+          check() {
+            bin=$1 machine=$2
+            readelf -h "$bin" | grep -Eq "Machine:[[:space:]]+$machine\$" || { echo "$bin: machine is not $machine"; return 1; }
+            if readelf -lW "$bin" | grep -q 'Requesting program interpreter'; then echo "$bin: requests a program interpreter"; return 1; fi
+            if readelf -dW "$bin" | grep -q '(NEEDED)'; then echo "$bin: needs shared libraries"; return 1; fi
+            echo "$bin: static $machine"
+          }
+          check target/x86_64-unknown-linux-musl/release/fettle-agent 'Advanced Micro Devices X86-64'
+          check target/aarch64-unknown-linux-musl/release/fettle-agent AArch64
+      - name: Run on stock Debian and Ubuntu
+        run: |
+          for pair in amd64:x86_64-unknown-linux-musl arm64:aarch64-unknown-linux-musl; do
+            arch=${pair%%:*} target=${pair#*:}
+            for image in debian:13 ubuntu:24.04; do
+              echo "::group::$image $arch"
+              docker run --rm --platform "linux/$arch" \
+                -v "$PWD/target/$target/release/fettle-agent:/usr/local/bin/fettle-agent:ro" \
+                "$image" fettle-agent
+              echo "$image $arch: exit 0"
+              echo "::endgroup::"
+            done
+          done
