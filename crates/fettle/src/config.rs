@@ -115,7 +115,8 @@ impl Config {
     /// # Errors
     ///
     /// Fails when the file cannot be read, has a syntax error, imports a module other than
-    /// `"fettle"`, throws at the top level, never finishes, or registers an invalid host.
+    /// `"fettle"` or uses `import()`, throws at the top level, never finishes, or registers an
+    /// invalid host.
     pub fn load(path: impl Into<PathBuf>) -> Result<Self, Error> {
         let file = path.into();
         let path = file.as_path();

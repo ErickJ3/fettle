@@ -26,19 +26,34 @@ pub(crate) fn strip(path: &Path, source: &str) -> Result<Script, Error> {
     if let Some(diagnostic) = parsed.diagnostics.first() {
         return Err(diagnostic_error(path, source, diagnostic));
     }
-    if let Some((specifier, offset)) = parsed
+    let static_imports = parsed
         .module_record
         .requested_modules
         .iter()
         .filter(|(specifier, _)| specifier.as_str() != FETTLE_MODULE)
-        .flat_map(|(specifier, requests)| requests.iter().map(move |r| (specifier, r.span.start)))
-        .min_by_key(|(_, offset)| *offset)
+        .flat_map(|(specifier, requests)| {
+            requests.iter().map(move |r| {
+                (
+                    r.span.start,
+                    format!(
+                        "cannot import \"{specifier}\": fettle.ts can only import \"{FETTLE_MODULE}\""
+                    ),
+                )
+            })
+        });
+    let dynamic_imports = parsed.module_record.dynamic_imports.iter().map(|import| {
+        (
+            import.span.start,
+            format!(
+                "cannot use import(): fettle.ts can only import \"{FETTLE_MODULE}\", statically"
+            ),
+        )
+    });
+    if let Some((offset, message)) = static_imports
+        .chain(dynamic_imports)
+        .min_by_key(|(offset, _)| *offset)
     {
-        return Err(Error::new(
-            ErrorKind::Syntax,
-            at(offset),
-            format!("cannot import \"{specifier}\": fettle.ts can only import \"{FETTLE_MODULE}\""),
-        ));
+        return Err(Error::new(ErrorKind::Syntax, at(offset), message));
     }
 
     let mut program = parsed.program;
@@ -163,5 +178,14 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(error.location.unwrap().column, 23);
+    }
+
+    #[test]
+    fn rejects_dynamic_imports() {
+        let error = strip_source("import { host } from \"fettle\";\nimport(\"./roles\");\n")
+            .err()
+            .unwrap();
+        assert!(error.message.contains("import()"), "{error}");
+        assert_eq!(error.location.unwrap().line, 2);
     }
 }

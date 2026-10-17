@@ -34,7 +34,8 @@ pub struct Error {
 pub enum ErrorKind {
     /// `fettle.ts` could not be read.
     Io,
-    /// `fettle.ts` is not valid TypeScript or imports a module other than `"fettle"`.
+    /// `fettle.ts` is not valid TypeScript, imports a module other than `"fettle"` or uses
+    /// `import()`.
     Syntax,
     /// The code threw, never finished, or declared an invalid host or resource.
     Script,

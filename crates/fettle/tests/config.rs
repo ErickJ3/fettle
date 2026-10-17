@@ -156,6 +156,15 @@ fn import_other_than_fettle_fails() {
 }
 
 #[test]
+fn dynamic_import_fails() {
+    let error = load_error(
+        "import { host } from \"fettle\";\nawait import(\"./roles\");\nhost(\"nas\", () => {});\n",
+    );
+    assert_eq!(error.kind(), ErrorKind::Syntax);
+    assert_at(&error, 2);
+}
+
+#[test]
 fn hosts_declared_in_a_loop() {
     let (_dir, config) = config(
         r#"import { host, pkg } from "fettle";
