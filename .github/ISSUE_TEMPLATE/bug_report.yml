@@ -1,0 +1,50 @@
+name: Bug report
+description: Something fettle did that it should not have, or did not do that it should.
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: fettle version or commit
+      placeholder: "0.1.0, or the commit SHA you built from"
+    validations:
+      required: true
+  - type: input
+    id: distro
+    attributes:
+      label: Target distribution
+      placeholder: "Debian 12, Ubuntu 24.04, ..."
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: fettle.ts excerpt
+      description: The smallest part of your configuration that reproduces the problem.
+      render: typescript
+    validations:
+      required: true
+  - type: input
+    id: command
+    attributes:
+      label: Command run
+      placeholder: "fettle apply nas"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Plan or apply output
+      render: text
