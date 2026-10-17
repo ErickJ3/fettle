@@ -241,6 +241,7 @@ name = "fettle-agent"
 version = "0.0.0"
 dependencies = [
  "fettle-protocol",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
