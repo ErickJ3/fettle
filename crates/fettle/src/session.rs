@@ -112,6 +112,11 @@ impl Session {
     /// # Errors
     ///
     /// Fails when the agent's stdin is closed.
+    ///
+    /// # Cancel safety
+    ///
+    /// Not cancel safe: a dropped future may leave part of a line on the agent's stdin, after
+    /// which the session can only be closed.
     pub async fn send(&mut self, message: &CliMessage) -> Result<(), Error> {
         let written = async {
             let mut line = serde_json::to_vec(message)?;
@@ -129,6 +134,10 @@ impl Session {
     /// # Errors
     ///
     /// Fails when the agent's stdout ends or the line is not an agent message.
+    ///
+    /// # Cancel safety
+    ///
+    /// Cancel safe: a dropped future has received no message, so none is lost.
     pub async fn recv(&mut self) -> Result<AgentMessage, Error> {
         let line = self
             .stdout
