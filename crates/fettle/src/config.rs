@@ -270,7 +270,12 @@ fn register_hosts<'js>(
             .map_err(engine_error)?
             .into_function()
             .ok_or_else(|| js.error(&stack, format!("host \"{name}\" needs a callback")))?;
-        let options: HostOptions = from_js(ctx, entry.get(1).map_err(engine_error)?)
+        let options =
+            to_json(ctx, js, &stack, entry.get(1).map_err(engine_error)?).map_err(|e| Error {
+                message: format!("host \"{name}\": {}", e.message),
+                ..e
+            })?;
+        let options: HostOptions = serde_path_to_error::deserialize(options)
             .map_err(|e| js.error(&stack, format!("host \"{name}\": {}", field_error(&e))))?;
         if let Some(first) = hosts.iter().position(|h: &Host| h.name == name) {
             return Err(js.error(
@@ -310,10 +315,11 @@ fn build_catalog<'js>(
                 format!("{kind}: the id must be a non-empty string or a list of them"),
             )
         })?;
-        let props = match entry.get::<Value>(2).map_err(engine_error)? {
-            props if props.is_undefined() => serde_json::json!({}),
-            props => to_json(ctx, props)?,
-        };
+        let props =
+            to_json(ctx, js, &stack, entry.get(2).map_err(engine_error)?).map_err(|e| Error {
+                message: format!("{kind}: {}", e.message),
+                ..e
+            })?;
         for id in ids {
             let desired: Desired = serde_path_to_error::deserialize(
                 serde_json::json!({ "kind": kind, "props": props }),
@@ -361,23 +367,29 @@ fn id_string(value: &Value<'_>) -> Option<String> {
         .filter(|id| !id.is_empty())
 }
 
-fn from_js<'js, T: serde::de::DeserializeOwned>(
+/// Converts the options or props of the declaration at `stack`, `undefined` meaning none.
+fn to_json<'js>(
     ctx: &Ctx<'js>,
+    js: &Js<'_>,
+    stack: &str,
     value: Value<'js>,
-) -> Result<T, serde_path_to_error::Error<serde_json::Error>> {
-    let json = if value.is_undefined() {
-        serde_json::json!({})
-    } else {
-        to_json(ctx, value).unwrap_or(serde_json::Value::Null)
+) -> Result<serde_json::Value, Error> {
+    if value.is_undefined() {
+        return Ok(serde_json::json!({}));
+    }
+    let json = match ctx.json_stringify(value).catch(ctx) {
+        Ok(Some(json)) => json.to_string().map_err(engine_error)?,
+        Ok(None) => return Ok(serde_json::Value::Null),
+        // A throw from user code, such as a `toJSON`, has its own location; one from
+        // `JSON.stringify` itself, such as on a BigInt, has none, so it points at the declaration.
+        Err(caught) => {
+            let error = js.caught(caught);
+            return Err(Error {
+                location: error.location.or_else(|| js.location(stack)),
+                ..error
+            });
+        }
     };
-    serde_path_to_error::deserialize(json)
-}
-
-fn to_json<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Result<serde_json::Value, Error> {
-    let Some(json) = ctx.json_stringify(value).map_err(engine_error)? else {
-        return Ok(serde_json::Value::Null);
-    };
-    let json = json.to_string().map_err(engine_error)?;
     serde_json::from_str(&json).map_err(|e| Error::new(None, e.to_string()))
 }
 

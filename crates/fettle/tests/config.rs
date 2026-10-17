@@ -227,6 +227,25 @@ fn host_option_of_the_wrong_type() {
 }
 
 #[test]
+fn host_option_that_json_cannot_hold() {
+    let error = load_error(
+        "import { host } from \"fettle\";\nhost(\"nas\", { ssh: 1n } as any, () => {});\n",
+    );
+    assert_at(&error, 2);
+    assert_mentions(&error, &["\"nas\"", "BigInt"]);
+}
+
+#[test]
+fn props_that_json_cannot_hold() {
+    let error = catalog_error(
+        "import { host, pkg } from \"fettle\";\nhost(\"nas\", () => {\n  pkg(\"htop\", { absent: 1n } as any);\n});\n",
+        "nas",
+    );
+    assert_at(&error, 3);
+    assert_mentions(&error, &["pkg", "BigInt"]);
+}
+
+#[test]
 fn host_without_a_callback() {
     let error =
         load_error("import { host } from \"fettle\";\n\nhost(\"nas\", { ssh: \"root@nas\" });\n");
