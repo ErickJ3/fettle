@@ -4,6 +4,7 @@ use std::fmt;
 use std::num::NonZeroUsize;
 use std::process::Output;
 use std::sync::Arc;
+use std::time::Duration;
 
 use fettle_protocol::{AgentMessage, CliMessage, Facts};
 use openssh::{ChildStdin, ChildStdout, ControlPersist, OwningCommand, SessionBuilder, Stdio};
@@ -24,11 +25,72 @@ const BUNDLED: [(&str, Option<Agent>); 2] = [("x86_64", X86_64), ("aarch64", AAR
 /// a CLI that was killed outright leaves it without clients.
 const CONTROL_PERSIST_SECONDS: NonZeroUsize = NonZeroUsize::new(5).unwrap();
 
+/// Fails an unreachable host instead of waiting out the OS TCP timeout, which can take minutes;
+/// the value is a guess generous enough for slow links.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Probes an idle connection so a link that dropped silently fails the waits on the agent
+/// instead of hanging them; ssh gives up after three unanswered probes.
+const SERVER_ALIVE_INTERVAL: Duration = Duration::from_secs(15);
+
 /// A failure on one host.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `message` leaves out the [`source`](std::error::Error::source), so report the whole chain:
+/// for ssh failures it holds the ssh client's own message.
+#[derive(Debug, Clone)]
 pub struct Error {
-    pub destination: String,
-    pub message: String,
+    destination: String,
+    kind: ErrorKind,
+    message: String,
+    source: Option<Arc<dyn std::error::Error + Send + Sync>>,
+}
+
+/// What failed, for callers that handle failures differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorKind {
+    /// ssh could not connect, run a command or close.
+    Ssh,
+    /// This build has no agent for the host's architecture.
+    UnsupportedArch,
+    /// Uploading the agent failed.
+    Upload,
+    /// The agent's pipes broke or it sent something other than the expected message.
+    Protocol,
+    /// The agent exited non-zero.
+    Agent,
+}
+
+impl Error {
+    #[must_use]
+    pub fn destination(&self) -> &str {
+        &self.destination
+    }
+
+    #[must_use]
+    pub fn kind(&self) -> ErrorKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    fn new(destination: &str, kind: ErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            destination: destination.to_owned(),
+            kind,
+            message: message.into(),
+            source: None,
+        }
+    }
+
+    fn caused_by(self, source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self {
+            source: Some(Arc::new(source)),
+            ..self
+        }
+    }
 }
 
 impl fmt::Display for Error {
@@ -37,7 +99,13 @@ impl fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {}
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source
+            .as_deref()
+            .map(|source| source as &(dyn std::error::Error + 'static))
+    }
+}
 
 /// The agent running on a host, reached over one SSH connection.
 pub struct Session {
@@ -53,40 +121,60 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// Fails when ssh cannot connect, the host's architecture has no bundled agent, the upload
-    /// fails, or the agent's first message is not its facts.
-    pub async fn connect(destination: &str) -> Result<(Session, Facts), Error> {
-        let fail = |message: String| Error {
-            destination: destination.to_owned(),
-            message,
-        };
+    /// - [`ErrorKind::Ssh`]: ssh cannot connect, or cannot run the commands that find and start
+    ///   the agent.
+    /// - [`ErrorKind::UnsupportedArch`]: the host's architecture has no bundled agent.
+    /// - [`ErrorKind::Upload`]: the upload fails or arrives incomplete.
+    /// - [`ErrorKind::Protocol`]: the agent's first message is not its facts.
+    /// - [`ErrorKind::Agent`]: the agent exits non-zero before sending its facts.
+    pub async fn connect(destination: impl Into<String>) -> Result<(Session, Facts), Error> {
+        let destination = destination.into();
+        let fail = |kind, message: &str| Error::new(&destination, kind, message);
         let ssh = SessionBuilder::default()
             .control_persist(ControlPersist::IdleFor(CONTROL_PERSIST_SECONDS))
-            .connect(destination)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .server_alive_interval(SERVER_ALIVE_INTERVAL)
+            .connect(&destination)
             .await
-            .map_err(|e| fail(chain(&e)))?;
+            .map_err(|e| fail(ErrorKind::Ssh, "cannot connect").caused_by(e))?;
         let ssh = Arc::new(ssh);
 
-        let machine = run(sh(&ssh, "uname -m"), None).await.map_err(fail)?;
-        let agent = select(&BUNDLED, machine.trim()).map_err(fail)?;
+        let machine = run(sh(&ssh, "uname -m"), None, |message| {
+            fail(ErrorKind::Ssh, message)
+        })
+        .await?;
+        let agent = select(&BUNDLED, machine.trim())
+            .map_err(|message| fail(ErrorKind::UnsupportedArch, &message))?;
         let path = format!("\"$HOME/.cache/fettle/agent-{}\"", agent.sha256);
         let cached = sh(&ssh, &format!("test -x {path}"))
             .status()
             .await
-            .map_err(|e| fail(chain(&e)))?
+            .map_err(|e| fail(ErrorKind::Ssh, "cannot look for a cached agent").caused_by(e))?
             .success();
         if !cached {
+            // An interrupted upload still ends `cat` with EOF and status 0, so the size check is
+            // what keeps a truncated agent from being published under its final name.
+            let size = agent.bytes.len();
             let upload = format!(
-                "mkdir -p \"$HOME/.cache/fettle\" && tmp={path}.$$ && cat > \"$tmp\" && chmod 700 \"$tmp\" && mv -f \"$tmp\" {path}"
+                "mkdir -p \"$HOME/.cache/fettle\" && tmp={path}.$$ && cat > \"$tmp\" \
+                 && received=$(wc -c < \"$tmp\") \
+                 && if [ $received -ne {size} ]; then rm -f \"$tmp\"; echo \"received $received of {size} bytes\" >&2; exit 1; fi \
+                 && chmod 700 \"$tmp\" && mv -f \"$tmp\" {path}"
             );
-            run(sh(&ssh, &upload), Some(agent.bytes))
-                .await
-                .map_err(|e| fail(format!("uploading the agent: {e}")))?;
+            run(sh(&ssh, &upload), Some(agent.bytes), |message| {
+                fail(
+                    ErrorKind::Upload,
+                    &format!("uploading the agent: {message}"),
+                )
+            })
+            .await?;
         }
 
-        let (agent, stdin, stdout) = start(&ssh, &path).await.map_err(|e| fail(chain(&e)))?;
+        let (agent, stdin, stdout) = start(&ssh, &path)
+            .await
+            .map_err(|e| fail(ErrorKind::Ssh, "cannot start the agent").caused_by(e))?;
         let mut session = Session {
-            destination: destination.to_owned(),
+            destination,
             ssh,
             agent,
             stdin,
@@ -94,10 +182,14 @@ impl Session {
         };
         match session.recv().await {
             Ok(AgentMessage::Facts(facts)) => Ok((session, facts)),
-            Ok(other) => Err(session
-                .abort(format!("expected facts, got {other:?}"))
-                .await),
-            Err(error) => Err(session.abort(error.message).await),
+            Ok(other) => {
+                let problem = session.error(
+                    ErrorKind::Protocol,
+                    format!("expected facts, got {other:?}"),
+                );
+                Err(session.abort(problem).await)
+            }
+            Err(problem) => Err(session.abort(problem).await),
         }
     }
 
@@ -106,6 +198,11 @@ impl Session {
     /// # Errors
     ///
     /// Fails when the agent's stdin is closed.
+    ///
+    /// # Cancel safety
+    ///
+    /// Not cancel safe: a dropped future may leave part of a line on the agent's stdin, after
+    /// which the session can only be closed.
     pub async fn send(&mut self, message: &CliMessage) -> Result<(), Error> {
         let written = async {
             let mut line = serde_json::to_vec(message)?;
@@ -113,9 +210,10 @@ impl Session {
             self.stdin.write_all(&line).await?;
             self.stdin.flush().await
         };
-        written
-            .await
-            .map_err(|e| self.error(format!("sending to the agent: {e}")))
+        written.await.map_err(|e| {
+            self.error(ErrorKind::Protocol, "cannot send to the agent")
+                .caused_by(e)
+        })
     }
 
     /// Reads the agent's next message.
@@ -123,22 +221,35 @@ impl Session {
     /// # Errors
     ///
     /// Fails when the agent's stdout ends or the line is not an agent message.
+    ///
+    /// # Cancel safety
+    ///
+    /// Cancel safe: a dropped future has received no message, so none is lost.
     pub async fn recv(&mut self) -> Result<AgentMessage, Error> {
         let line = self
             .stdout
             .next_line()
             .await
-            .map_err(|e| self.error(format!("reading from the agent: {e}")))?
-            .ok_or_else(|| self.error("the agent closed its output".to_owned()))?;
-        serde_json::from_str(&line)
-            .map_err(|e| self.error(format!("unreadable agent message {line:?}: {e}")))
+            .map_err(|e| {
+                self.error(ErrorKind::Protocol, "cannot read from the agent")
+                    .caused_by(e)
+            })?
+            .ok_or_else(|| self.error(ErrorKind::Protocol, "the agent closed its output"))?;
+        serde_json::from_str(&line).map_err(|e| {
+            self.error(
+                ErrorKind::Protocol,
+                format!("unreadable agent message {line:?}"),
+            )
+            .caused_by(e)
+        })
     }
 
     /// Ends the session: closes the agent's stdin, waits for it to exit, then closes SSH.
     ///
     /// # Errors
     ///
-    /// Fails when the agent exits non-zero, with its status and error output.
+    /// - [`ErrorKind::Agent`]: the agent exits non-zero, with its status and error output.
+    /// - [`ErrorKind::Ssh`]: waiting for the agent or closing the connection fails.
     pub async fn close(self) -> Result<(), Error> {
         let Session {
             destination,
@@ -148,48 +259,48 @@ impl Session {
             stdout,
         } = self;
         drop((stdin, stdout));
-        let fail = |message: String| Error {
-            destination: destination.clone(),
-            message,
-        };
+        let fail = |kind, message: &str| Error::new(&destination, kind, message);
         let output = agent
             .wait_with_output()
             .await
-            .map_err(|e| fail(chain(&e)))?;
+            .map_err(|e| fail(ErrorKind::Ssh, "cannot wait for the agent").caused_by(e))?;
         if !output.status.success() {
-            return Err(fail(agent_failure(&output)));
+            return Err(fail(ErrorKind::Agent, &agent_failure(&output)));
         }
         if let Ok(ssh) = Arc::try_unwrap(ssh) {
-            ssh.close().await.map_err(|e| fail(chain(&e)))?;
+            ssh.close()
+                .await
+                .map_err(|e| fail(ErrorKind::Ssh, "cannot close the connection").caused_by(e))?;
         }
         Ok(())
     }
 
-    /// Waits for an agent that broke the protocol and reports what it wrote to stderr.
-    async fn abort(self, problem: String) -> Error {
+    /// Waits for an agent that broke the protocol and adds what it wrote to stderr to `problem`.
+    async fn abort(self, problem: Error) -> Error {
         let Session {
-            destination,
             agent,
             stdin,
             stdout,
             ..
         } = self;
         drop((stdin, stdout));
-        let message = match agent.wait_with_output().await {
-            Ok(output) => format!("{problem}; {}", agent_failure(&output)),
-            Err(e) => format!("{problem}; {}", chain(&e)),
-        };
-        Error {
-            destination,
-            message,
+        match agent.wait_with_output().await {
+            Ok(output) => Error {
+                kind: if output.status.success() {
+                    problem.kind
+                } else {
+                    ErrorKind::Agent
+                },
+                message: format!("{}; {}", problem.message, agent_failure(&output)),
+                ..problem
+            },
+            // `problem` came first; a failed wait on top of it says nothing about the agent.
+            Err(_) => problem,
         }
     }
 
-    fn error(&self, message: String) -> Error {
-        Error {
-            destination: self.destination.clone(),
-            message,
-        }
+    fn error(&self, kind: ErrorKind, message: impl Into<String>) -> Error {
+        Error::new(&self.destination, kind, message)
     }
 }
 
@@ -229,11 +340,13 @@ fn sh(ssh: &Arc<openssh::Session>, script: &str) -> OwningCommand<Arc<openssh::S
     command
 }
 
-/// Runs a short command to completion, feeding it `input`, and returns its stdout.
+/// Runs a short command to completion, feeding it `input`, and returns its stdout; `fail` turns
+/// a message into the error the caller reports for this command.
 async fn run(
     mut command: OwningCommand<Arc<openssh::Session>>,
     input: Option<&[u8]>,
-) -> Result<String, String> {
+    fail: impl Fn(&str) -> Error,
+) -> Result<String, Error> {
     let mut child = command
         .stdin(if input.is_some() {
             Stdio::piped()
@@ -244,20 +357,32 @@ async fn run(
         .stderr(Stdio::piped())
         .spawn()
         .await
-        .map_err(|e| chain(&e))?;
-    if let Some(input) = input {
-        let mut stdin = child.stdin().take().expect("piped stdin");
-        stdin.write_all(input).await.map_err(|e| e.to_string())?;
-        stdin.shutdown().await.map_err(|e| e.to_string())?;
-    }
-    let output = child.wait_with_output().await.map_err(|e| chain(&e))?;
+        .map_err(|e| fail("cannot run the command").caused_by(e))?;
+    let written = match input {
+        Some(input) => {
+            let mut stdin = child.stdin().take().expect("piped stdin");
+            async {
+                stdin.write_all(input).await?;
+                stdin.shutdown().await
+            }
+            .await
+        }
+        None => Ok(()),
+    };
+    // A command that fails early breaks the pipe; its status and stderr say why, the write
+    // error does not.
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|e| fail("cannot wait for the command").caused_by(e))?;
     if !output.status.success() {
-        return Err(format!(
+        return Err(fail(&format!(
             "{}: {}",
             output.status,
             String::from_utf8_lossy(&output.stderr).trim()
-        ));
+        )));
     }
+    written.map_err(|e| fail("cannot write the command's input").caused_by(e))?;
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
@@ -267,18 +392,6 @@ fn agent_failure(output: &Output) -> String {
         output.status,
         String::from_utf8_lossy(&output.stderr).trim()
     )
-}
-
-/// `openssh` errors carry the ssh client's own message in their sources.
-fn chain(error: &dyn std::error::Error) -> String {
-    let mut message = error.to_string();
-    let mut source = error.source();
-    while let Some(cause) = source {
-        message.push_str(": ");
-        message.push_str(&cause.to_string());
-        source = cause.source();
-    }
-    message
 }
 
 #[cfg(test)]
@@ -324,10 +437,7 @@ mod tests {
             stderr: b"fettle-agent: no os-release file at /etc/os-release or /usr/lib/os-release\n"
                 .to_vec(),
         };
-        let error = Error {
-            destination: "nas".into(),
-            message: agent_failure(&output),
-        };
+        let error = Error::new("nas", ErrorKind::Agent, agent_failure(&output));
         assert_eq!(
             error.to_string(),
             "nas: agent exit status: 1: fettle-agent: no os-release file at /etc/os-release or /usr/lib/os-release"
