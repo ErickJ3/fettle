@@ -45,7 +45,7 @@ fn catalog_of(source: &str, host: &str) -> Result<Catalog, Error> {
 
 fn catalog_with(source: &str, host: &str, facts: &Facts) -> Result<Catalog, Error> {
     let (_dir, config) = config(source);
-    let host = config.hosts().iter().find(|h| h.name() == host).unwrap();
+    let host = config.hosts().find(|h| h.name() == host).unwrap();
     config.catalog(host, facts)
 }
 
@@ -65,8 +65,12 @@ fn debian() -> Facts {
     }
 }
 
+fn first_host(config: &Config) -> &Host {
+    config.hosts().next().unwrap()
+}
+
 fn host_names(config: &Config) -> Vec<&str> {
-    config.hosts().iter().map(Host::name).collect()
+    config.hosts().map(Host::name).collect()
 }
 
 fn pkg(id: &str) -> Resource {
@@ -109,7 +113,7 @@ host(name, (h: { os: { family: string } }): void => {
 "#,
     );
     assert_eq!(host_names(&config), ["nas"]);
-    let catalog = config.catalog(&config.hosts()[0], &debian()).unwrap();
+    let catalog = config.catalog(first_host(&config), &debian()).unwrap();
     assert_eq!(catalog, [pkg("caddy")]);
 }
 
@@ -203,8 +207,8 @@ host("nas", () => {});
 #[test]
 fn host_without_ssh_option() {
     let (_dir, config) = config("import { host } from \"fettle\";\nhost(\"nas\", () => {});\n");
-    assert_eq!(config.hosts()[0].ssh(), "nas");
-    assert_eq!(config.hosts()[0].tags(), Vec::<String>::new());
+    assert_eq!(first_host(&config).ssh(), "nas");
+    assert_eq!(first_host(&config).tags(), Vec::<String>::new());
 }
 
 #[test]
@@ -212,8 +216,8 @@ fn explicit_ssh_option() {
     let (_dir, config) = config(
         "import { host } from \"fettle\";\nhost(\"nas\", { ssh: \"root@192.168.1.10\", tags: [\"home\"] }, () => {});\n",
     );
-    assert_eq!(config.hosts()[0].ssh(), "root@192.168.1.10");
-    assert_eq!(config.hosts()[0].tags(), ["home"]);
+    assert_eq!(first_host(&config).ssh(), "root@192.168.1.10");
+    assert_eq!(first_host(&config).tags(), ["home"]);
 }
 
 #[test]
@@ -402,7 +406,7 @@ fn callback_state_resets_after_a_failure() {
     let (_dir, config) = config(
         "import { host, pkg } from \"fettle\";\nhost(\"bad\", () => { pkg(\"x\"); throw new Error(\"no\"); });\nhost(\"good\", () => pkg(\"htop\"));\n",
     );
-    let [bad, good] = config.hosts() else {
+    let [bad, good] = config.hosts().collect::<Vec<_>>()[..] else {
         panic!()
     };
     assert!(config.catalog(bad, &debian()).is_err());
@@ -415,7 +419,9 @@ fn host_from_another_config_is_rejected() {
     let (_two_dir, two) = config(
         "import { host } from \"fettle\";\nhost(\"nas\", () => {});\nhost(\"pi\", () => {});\n",
     );
-    let error = one.catalog(&two.hosts()[1], &debian()).unwrap_err();
+    let error = one
+        .catalog(two.hosts().nth(1).unwrap(), &debian())
+        .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::UnknownHost);
     assert_mentions(&error, &["\"pi\"", "not registered"]);
 }
@@ -428,7 +434,7 @@ fn host_of_the_same_name_from_another_config_is_rejected() {
     let (_two_dir, two) = config(
         "import { host, pkg } from \"fettle\";\nhost(\"nas\", { ssh: \"root@b\" }, () => pkg(\"b\"));\n",
     );
-    let error = one.catalog(&two.hosts()[0], &debian()).unwrap_err();
+    let error = one.catalog(first_host(&two), &debian()).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::UnknownHost);
 }
 
@@ -587,7 +593,7 @@ host("nas", () => {
 "#,
     );
     let config = loaded.result.unwrap();
-    let catalog = config.catalog(&config.hosts()[0], &debian()).unwrap();
+    let catalog = config.catalog(first_host(&config), &debian()).unwrap();
     assert_eq!(
         catalog,
         [Resource {
@@ -609,7 +615,7 @@ fn read_resolves_home() {
     let (_dir, config) = config(&format!(
         "import {{ host, file, read }} from \"fettle\";\nconst text = read(\"~/{name}\");\nhost(\"nas\", () => file(\"/etc/motd\", {{ content: text }}));\n"
     ));
-    let catalog = config.catalog(&config.hosts()[0], &debian()).unwrap();
+    let catalog = config.catalog(first_host(&config), &debian()).unwrap();
     assert_eq!(
         serde_json::to_value(&catalog).unwrap()[0]["props"]["content"],
         "from home"
@@ -636,7 +642,7 @@ host("nas", () => {
 "#,
     );
     let config = loaded.result.unwrap();
-    let error = config.catalog(&config.hosts()[0], &debian()).unwrap_err();
+    let error = config.catalog(first_host(&config), &debian()).unwrap_err();
     assert_at(&error, 4);
     let resolved: PathBuf = loaded.dir.path().join("./missing.txt");
     assert_mentions(&error, &[&resolved.display().to_string()]);

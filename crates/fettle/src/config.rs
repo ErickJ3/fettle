@@ -25,11 +25,8 @@ const STATE_GLOBAL: &str = "__fettle";
 ///
 /// Not `Send`: build catalogs on the thread that loaded the config.
 pub struct Config {
-    // Invariant: `hosts[i].index == i`, and `callbacks[i]` and `host_stacks[i]` belong to
-    // `hosts[i]`.
-    hosts: Vec<Host>,
-    callbacks: Vec<Persistent<Function<'static>>>,
-    host_stacks: Vec<String>,
+    // Invariant: `registrations[i].host.index == i`.
+    registrations: Vec<Registration>,
     state: Persistent<Object<'static>>,
     file: PathBuf,
     module: String,
@@ -61,6 +58,13 @@ impl Host {
     pub fn tags(&self) -> &[String] {
         &self.tags
     }
+}
+
+/// A host with its callback and the stack of its declaration.
+struct Registration {
+    host: Host,
+    callback: Persistent<Function<'static>>,
+    stack: String,
 }
 
 #[derive(Deserialize)]
@@ -154,7 +158,7 @@ impl Config {
             map: &script.map,
         };
 
-        let (state, registered) = context.with(|ctx| -> Result<_, Error> {
+        let (state, registrations) = context.with(|ctx| -> Result<_, Error> {
             let state = new_state(&ctx, base).map_err(engine_error)?;
             ctx.globals()
                 .set(STATE_GLOBAL, state.clone())
@@ -176,15 +180,12 @@ impl Config {
                 }
                 Err(caught) => return Err(js.caught(caught)),
             }
-            let registered = register_hosts(&ctx, &js, &state)?;
-            Ok((Persistent::save(&ctx, state), registered))
+            let registrations = register_hosts(&ctx, &js, &state)?;
+            Ok((Persistent::save(&ctx, state), registrations))
         })?;
 
-        let (hosts, callbacks, host_stacks) = registered;
         Ok(Self {
-            hosts,
-            callbacks,
-            host_stacks,
+            registrations,
             state,
             file,
             module,
@@ -194,9 +195,10 @@ impl Config {
     }
 
     /// Registered hosts, in registration order.
-    #[must_use]
-    pub fn hosts(&self) -> &[Host] {
-        &self.hosts
+    pub fn hosts(&self) -> impl ExactSizeIterator<Item = &Host> {
+        self.registrations
+            .iter()
+            .map(|registration| &registration.host)
     }
 
     /// Runs the callback of `host`, one of [`Config::hosts`], with its facts.
@@ -207,17 +209,7 @@ impl Config {
     /// thenable, declares an invalid resource or declares two different resources with the same
     /// identity.
     pub fn catalog(&self, host: &Host, facts: &Facts) -> Result<Catalog, Error> {
-        if self
-            .hosts
-            .get(host.index)
-            .is_none_or(|registered| registered != host)
-        {
-            return Err(Error::new(
-                ErrorKind::UnknownHost,
-                None,
-                format!("host \"{}\" is not registered by this config", host.name),
-            ));
-        }
+        let registration = self.registration(host)?;
         let js = Js {
             file: &self.file,
             module: &self.module,
@@ -230,14 +222,14 @@ impl Config {
                 state
                     .set("current", declared.clone())
                     .map_err(engine_error)?;
-                let returned = self.run_callback(&ctx, &js, host, facts);
+                let returned = run_callback(&ctx, &js, registration, facts);
                 state
                     .set("current", Value::new_null(ctx.clone()))
                     .map_err(engine_error)?;
                 if is_thenable(&returned?) {
                     return Err(Error::new(
                         ErrorKind::Script,
-                        js.location(&self.host_stacks[host.index]),
+                        js.location(&registration.stack),
                         "the callback must be synchronous, but it returned a promise",
                     ));
                 }
@@ -246,29 +238,40 @@ impl Config {
             .map_err(|e| e.prefixed(&format!("host \"{}\"", host.name)))
     }
 
-    fn run_callback<'js>(
-        &self,
-        ctx: &Ctx<'js>,
-        js: &Js<'_>,
-        host: &Host,
-        facts: &Facts,
-    ) -> Result<Value<'js>, Error> {
-        let callback = self.callbacks[host.index]
-            .clone()
-            .restore(ctx)
-            .map_err(engine_error)?;
-        let facts = serde_json::to_string(facts).map_err(|e| {
-            Error::new(ErrorKind::Engine, None, "cannot convert the facts to JSON").caused_by(e)
-        })?;
-        let facts = ctx.json_parse(facts).map_err(engine_error)?;
-        callback
-            .call::<_, Value>((facts,))
-            .catch(ctx)
-            .map_err(|e| js.caught_at(e, &self.host_stacks[host.index]))
+    fn registration(&self, host: &Host) -> Result<&Registration, Error> {
+        self.registrations
+            .get(host.index)
+            .filter(|registration| registration.host == *host)
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::UnknownHost,
+                    None,
+                    format!("host \"{}\" is not registered by this config", host.name),
+                )
+            })
     }
 }
 
-type Registered = (Vec<Host>, Vec<Persistent<Function<'static>>>, Vec<String>);
+fn run_callback<'js>(
+    ctx: &Ctx<'js>,
+    js: &Js<'_>,
+    registration: &Registration,
+    facts: &Facts,
+) -> Result<Value<'js>, Error> {
+    let callback = registration
+        .callback
+        .clone()
+        .restore(ctx)
+        .map_err(engine_error)?;
+    let facts = serde_json::to_string(facts).map_err(|e| {
+        Error::new(ErrorKind::Engine, None, "cannot convert the facts to JSON").caused_by(e)
+    })?;
+    let facts = ctx.json_parse(facts).map_err(engine_error)?;
+    callback
+        .call::<_, Value>((facts,))
+        .catch(ctx)
+        .map_err(|e| js.caught_at(e, &registration.stack))
+}
 
 fn new_state<'js>(ctx: &Ctx<'js>, base: PathBuf) -> rquickjs::Result<Object<'js>> {
     let state = Object::new(ctx.clone())?;
@@ -298,9 +301,9 @@ fn register_hosts<'js>(
     ctx: &Ctx<'js>,
     js: &Js<'_>,
     state: &Object<'js>,
-) -> Result<Registered, Error> {
+) -> Result<Vec<Registration>, Error> {
     let entries: Vec<Array<'js>> = state.get("hosts").map_err(engine_error)?;
-    let (mut hosts, mut callbacks, mut stacks) = (Vec::new(), Vec::new(), Vec::<String>::new());
+    let mut registrations: Vec<Registration> = Vec::new();
     for entry in entries {
         let stack: String = entry.get(3).map_err(engine_error)?;
         let name = entry
@@ -321,25 +324,27 @@ fn register_hosts<'js>(
             .map_err(|e| e.prefixed(&format!("host \"{name}\"")))?;
         let options: HostOptions = serde_path_to_error::deserialize(options)
             .map_err(|e| js.error(&stack, format!("host \"{name}\": {}", field_error(&e))))?;
-        if let Some(first) = hosts.iter().position(|h: &Host| h.name == name) {
+        if let Some(first) = registrations.iter().find(|r| r.host.name == name) {
             return Err(js.error(
                 &stack,
                 format!(
                     "host \"{name}\" is declared twice, first at {}",
-                    describe_location(js, &stacks[first])
+                    describe_location(js, &first.stack)
                 ),
             ));
         }
-        hosts.push(Host {
-            ssh: options.ssh.unwrap_or_else(|| name.clone()),
-            tags: options.tags.unwrap_or_default(),
-            name,
-            index: callbacks.len(),
+        registrations.push(Registration {
+            host: Host {
+                ssh: options.ssh.unwrap_or_else(|| name.clone()),
+                tags: options.tags.unwrap_or_default(),
+                name,
+                index: registrations.len(),
+            },
+            callback: Persistent::save(ctx, callback),
+            stack,
         });
-        callbacks.push(Persistent::save(ctx, callback));
-        stacks.push(stack);
     }
-    Ok((hosts, callbacks, stacks))
+    Ok(registrations)
 }
 
 fn build_catalog<'js>(
