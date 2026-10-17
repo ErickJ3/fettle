@@ -143,8 +143,14 @@ impl Session {
             .map_err(|e| fail(ErrorKind::Ssh, "cannot look for a cached agent").caused_by(e))?
             .success();
         if !cached {
+            // An interrupted upload still ends `cat` with EOF and status 0, so the size check is
+            // what keeps a truncated agent from being published under its final name.
+            let size = agent.bytes.len();
             let upload = format!(
-                "mkdir -p \"$HOME/.cache/fettle\" && tmp={path}.$$ && cat > \"$tmp\" && chmod 700 \"$tmp\" && mv -f \"$tmp\" {path}"
+                "mkdir -p \"$HOME/.cache/fettle\" && tmp={path}.$$ && cat > \"$tmp\" \
+                 && received=$(wc -c < \"$tmp\") \
+                 && if [ $received -ne {size} ]; then rm -f \"$tmp\"; echo \"received $received of {size} bytes\" >&2; exit 1; fi \
+                 && chmod 700 \"$tmp\" && mv -f \"$tmp\" {path}"
             );
             run(sh(&ssh, &upload), Some(agent.bytes), |message| {
                 fail(
