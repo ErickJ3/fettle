@@ -336,6 +336,23 @@ host("nas", () => {
 }
 
 #[test]
+fn exception_in_a_function_whose_name_has_parentheses() {
+    let error = catalog_error(
+        r#"import { host, pkg } from "fettle";
+const o = { ["role (web)"]() {
+  pkg(42 as any);
+} };
+host("nas", () => {
+
+  o["role (web)"]();
+});
+"#,
+        "nas",
+    );
+    assert_at(&error, 3);
+}
+
+#[test]
 fn resource_at_top_level() {
     let error = load_error("import { pkg } from \"fettle\";\n\npkg(\"htop\");\n");
     assert_at(&error, 3);

@@ -131,11 +131,7 @@ impl SourceMap {
 
 /// Finds the first frame of `stack` in `module` and maps it to its place in `fettle.ts`.
 pub(crate) fn locate(stack: &str, module: &str, map: &SourceMap, file: &Path) -> Option<Location> {
-    let (line, column) = stack
-        .lines()
-        .filter_map(frame)
-        .find(|(name, _, _)| *name == module)
-        .map(|(_, line, column)| (line, column))?;
+    let (line, column) = stack.lines().find_map(|frame| position(frame, module))?;
     let (line, column) = map.original(line, column)?;
     Some(Location {
         file: file.to_path_buf(),
@@ -144,18 +140,21 @@ pub(crate) fn locate(stack: &str, module: &str, map: &SourceMap, file: &Path) ->
     })
 }
 
-/// Parses `at name (file:line:column)` or `at file:line:column`.
-fn frame(line: &str) -> Option<(&str, u32, u32)> {
-    let rest = line.trim().strip_prefix("at ")?;
-    // The first ` (` ends the function name; the file path after it may hold parentheses too.
-    let position = match rest.find(" (") {
-        Some(open) if rest.ends_with(')') => &rest[open + 2..rest.len() - 1],
-        _ => rest,
+/// Parses the `line:column` of a frame `at name (module:line:column)` or `at module:line:column`.
+fn position(frame: &str, module: &str) -> Option<(u32, u32)> {
+    let frame = frame.trim().strip_prefix("at ")?;
+    // Searching for the module itself, rather than for the ` (` that ends the name, keeps a
+    // name or a path holding parentheses from moving the split.
+    let rest = if let Some(anonymous) = frame.strip_prefix(module) {
+        anonymous
+    } else {
+        frame
+            .strip_suffix(')')?
+            .rsplit_once(&format!("({module}"))?
+            .1
     };
-    let mut parts = position.rsplitn(3, ':');
-    let column = parts.next()?.parse().ok()?;
-    let line = parts.next()?.parse().ok()?;
-    Some((parts.next()?, line, column))
+    let (line, column) = rest.strip_prefix(':')?.split_once(':')?;
+    Some((line.parse().ok()?, column.parse().ok()?))
 }
 
 #[cfg(test)]
@@ -175,22 +174,30 @@ mod tests {
     #[test]
     fn parses_named_and_anonymous_frames() {
         assert_eq!(
-            frame("    at role (/abs/fettle.ts:3:2)"),
-            Some((MODULE, 3, 2))
+            position("    at role (/abs/fettle.ts:3:2)", MODULE),
+            Some((3, 2))
         );
-        assert_eq!(frame("    at /abs/fettle.ts:7:9"), Some((MODULE, 7, 9)));
-        assert_eq!(
-            frame("    at <anonymous> (fettle:12:5)"),
-            Some(("fettle", 12, 5))
-        );
-        assert_eq!(frame("Error: boom"), None);
+        assert_eq!(position("    at /abs/fettle.ts:7:9", MODULE), Some((7, 9)));
+        assert_eq!(position("    at <anonymous> (fettle:12:5)", MODULE), None);
+        assert_eq!(position("Error: boom", MODULE), None);
     }
 
     #[test]
     fn parses_frames_whose_path_has_parentheses() {
         assert_eq!(
-            frame("    at <anonymous> (/home/me/infra (old)/fettle.ts:1:22)"),
-            Some(("/home/me/infra (old)/fettle.ts", 1, 22))
+            position(
+                "    at <anonymous> (/home/me/infra (old)/fettle.ts:1:22)",
+                "/home/me/infra (old)/fettle.ts"
+            ),
+            Some((1, 22))
+        );
+    }
+
+    #[test]
+    fn parses_frames_whose_name_has_parentheses() {
+        assert_eq!(
+            position("    at role (web) (/abs/fettle.ts:3:2)", MODULE),
+            Some((3, 2))
         );
     }
 
