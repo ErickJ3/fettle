@@ -39,11 +39,28 @@ pub struct Config {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Host {
-    pub name: String,
-    /// SSH destination, the host name unless the `ssh` option replaces it.
-    pub ssh: String,
-    pub tags: Vec<String>,
+    name: String,
+    ssh: String,
+    tags: Vec<String>,
     index: usize,
+}
+
+impl Host {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// SSH destination, the host name unless the `ssh` option replaces it.
+    #[must_use]
+    pub fn ssh(&self) -> &str {
+        &self.ssh
+    }
+
+    #[must_use]
+    pub fn tags(&self) -> &[String] {
+        &self.tags
+    }
 }
 
 #[derive(Deserialize)]

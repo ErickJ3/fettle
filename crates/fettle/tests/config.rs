@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use fettle::config::{Config, Error, ErrorKind};
+use fettle::config::{Config, Error, ErrorKind, Host};
 use fettle_protocol::{Catalog, Desired, Facts, Os, Pkg, Resource, Service, User};
 use tempfile::TempDir;
 
@@ -45,7 +45,7 @@ fn catalog_of(source: &str, host: &str) -> Result<Catalog, Error> {
 
 fn catalog_with(source: &str, host: &str, facts: &Facts) -> Result<Catalog, Error> {
     let (_dir, config) = config(source);
-    let host = config.hosts().iter().find(|h| h.name == host).unwrap();
+    let host = config.hosts().iter().find(|h| h.name() == host).unwrap();
     config.catalog(host, facts)
 }
 
@@ -66,7 +66,7 @@ fn debian() -> Facts {
 }
 
 fn host_names(config: &Config) -> Vec<&str> {
-    config.hosts().iter().map(|h| h.name.as_str()).collect()
+    config.hosts().iter().map(Host::name).collect()
 }
 
 fn pkg(id: &str) -> Resource {
@@ -194,8 +194,8 @@ host("nas", () => {});
 #[test]
 fn host_without_ssh_option() {
     let (_dir, config) = config("import { host } from \"fettle\";\nhost(\"nas\", () => {});\n");
-    assert_eq!(config.hosts()[0].ssh, "nas");
-    assert_eq!(config.hosts()[0].tags, Vec::<String>::new());
+    assert_eq!(config.hosts()[0].ssh(), "nas");
+    assert_eq!(config.hosts()[0].tags(), Vec::<String>::new());
 }
 
 #[test]
@@ -203,8 +203,8 @@ fn explicit_ssh_option() {
     let (_dir, config) = config(
         "import { host } from \"fettle\";\nhost(\"nas\", { ssh: \"root@192.168.1.10\", tags: [\"home\"] }, () => {});\n",
     );
-    assert_eq!(config.hosts()[0].ssh, "root@192.168.1.10");
-    assert_eq!(config.hosts()[0].tags, ["home"]);
+    assert_eq!(config.hosts()[0].ssh(), "root@192.168.1.10");
+    assert_eq!(config.hosts()[0].tags(), ["home"]);
 }
 
 #[test]
