@@ -121,8 +121,12 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// Fails when ssh cannot connect, the host's architecture has no bundled agent, the upload
-    /// fails, or the agent's first message is not its facts.
+    /// - [`ErrorKind::Ssh`]: ssh cannot connect, or cannot run the commands that find and start
+    ///   the agent.
+    /// - [`ErrorKind::UnsupportedArch`]: the host's architecture has no bundled agent.
+    /// - [`ErrorKind::Upload`]: the upload fails or arrives incomplete.
+    /// - [`ErrorKind::Protocol`]: the agent's first message is not its facts.
+    /// - [`ErrorKind::Agent`]: the agent exits non-zero before sending its facts.
     pub async fn connect(destination: impl Into<String>) -> Result<(Session, Facts), Error> {
         let destination = destination.into();
         let fail = |kind, message: &str| Error::new(&destination, kind, message);
@@ -244,7 +248,8 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// Fails when the agent exits non-zero, with its status and error output.
+    /// - [`ErrorKind::Agent`]: the agent exits non-zero, with its status and error output.
+    /// - [`ErrorKind::Ssh`]: waiting for the agent or closing the connection fails.
     pub async fn close(self) -> Result<(), Error> {
         let Session {
             destination,
