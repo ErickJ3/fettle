@@ -1,7 +1,9 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-/// A position in `fettle.ts`, one-based.
+/// A position in `fettle.ts`, one-based, with the column in UTF-16 code units as TypeScript
+/// tools count it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Location {
     pub file: PathBuf,
@@ -15,18 +17,74 @@ impl fmt::Display for Location {
     }
 }
 
-/// An evaluation failure; `location` is `None` only when no line of `fettle.ts` caused it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// An evaluation failure; `location` is `None` when no line of `fettle.ts` caused it, or when
+/// the top level throws a value that is not an `Error` or awaits a promise that never settles.
+///
+/// `message` leaves out the [`source`](std::error::Error::source), so report the whole chain.
+#[derive(Debug, Clone)]
 pub struct Error {
-    pub location: Option<Location>,
-    pub message: String,
+    pub(crate) kind: ErrorKind,
+    pub(crate) location: Option<Location>,
+    pub(crate) message: String,
+    source: Option<Arc<dyn std::error::Error + Send + Sync>>,
+}
+
+/// What failed, for callers that handle failures differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorKind {
+    /// `fettle.ts` could not be read.
+    Io,
+    /// `fettle.ts` is not valid TypeScript, imports a module other than `"fettle"` or uses
+    /// `import()`.
+    Syntax,
+    /// The code threw, never finished, or declared an invalid host or resource.
+    Script,
+    /// [`Config::catalog`](super::Config::catalog) was given a host of another config.
+    UnknownHost,
+    /// The JavaScript engine failed, or a value could not cross between it and Rust.
+    Engine,
 }
 
 impl Error {
-    pub(crate) fn new(location: Option<Location>, message: impl Into<String>) -> Self {
+    #[must_use]
+    pub fn kind(&self) -> ErrorKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub fn location(&self) -> Option<&Location> {
+        self.location.as_ref()
+    }
+
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub(crate) fn new(
+        kind: ErrorKind,
+        location: Option<Location>,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
+            kind,
             location,
             message: message.into(),
+            source: None,
+        }
+    }
+
+    pub(crate) fn caused_by(self, source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self {
+            source: Some(Arc::new(source)),
+            ..self
+        }
+    }
+
+    pub(crate) fn prefixed(self, prefix: &str) -> Self {
+        Self {
+            message: format!("{prefix}: {}", self.message),
+            ..self
         }
     }
 }
@@ -40,7 +98,13 @@ impl fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {}
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source
+            .as_deref()
+            .map(|source| source as &(dyn std::error::Error + 'static))
+    }
+}
 
 /// Maps positions in the stripped JavaScript back to `fettle.ts`.
 #[derive(Debug, Default)]
@@ -70,11 +134,7 @@ impl SourceMap {
 
 /// Finds the first frame of `stack` in `module` and maps it to its place in `fettle.ts`.
 pub(crate) fn locate(stack: &str, module: &str, map: &SourceMap, file: &Path) -> Option<Location> {
-    let (line, column) = stack
-        .lines()
-        .filter_map(frame)
-        .find(|(name, _, _)| *name == module)
-        .map(|(_, line, column)| (line, column))?;
+    let (line, column) = stack.lines().find_map(|frame| position(frame, module))?;
     let (line, column) = map.original(line, column)?;
     Some(Location {
         file: file.to_path_buf(),
@@ -83,17 +143,21 @@ pub(crate) fn locate(stack: &str, module: &str, map: &SourceMap, file: &Path) ->
     })
 }
 
-/// Parses `at name (file:line:column)` or `at file:line:column`.
-fn frame(line: &str) -> Option<(&str, u32, u32)> {
-    let rest = line.trim().strip_prefix("at ")?;
-    let position = match rest.rfind('(') {
-        Some(open) if rest.ends_with(')') => &rest[open + 1..rest.len() - 1],
-        _ => rest,
+/// Parses the `line:column` of a frame `at name (module:line:column)` or `at module:line:column`.
+fn position(frame: &str, module: &str) -> Option<(u32, u32)> {
+    let frame = frame.trim().strip_prefix("at ")?;
+    // Searching for the module itself, rather than for the ` (` that ends the name, keeps a
+    // name or a path holding parentheses from moving the split.
+    let rest = if let Some(anonymous) = frame.strip_prefix(module) {
+        anonymous
+    } else {
+        frame
+            .strip_suffix(')')?
+            .rsplit_once(&format!("({module}"))?
+            .1
     };
-    let mut parts = position.rsplitn(3, ':');
-    let column = parts.next()?.parse().ok()?;
-    let line = parts.next()?.parse().ok()?;
-    Some((parts.next()?, line, column))
+    let (line, column) = rest.strip_prefix(':')?.split_once(':')?;
+    Some((line.parse().ok()?, column.parse().ok()?))
 }
 
 #[cfg(test)]
@@ -113,15 +177,31 @@ mod tests {
     #[test]
     fn parses_named_and_anonymous_frames() {
         assert_eq!(
-            frame("    at role (/abs/fettle.ts:3:2)"),
-            Some((MODULE, 3, 2))
+            position("    at role (/abs/fettle.ts:3:2)", MODULE),
+            Some((3, 2))
         );
-        assert_eq!(frame("    at /abs/fettle.ts:7:9"), Some((MODULE, 7, 9)));
+        assert_eq!(position("    at /abs/fettle.ts:7:9", MODULE), Some((7, 9)));
+        assert_eq!(position("    at <anonymous> (fettle:12:5)", MODULE), None);
+        assert_eq!(position("Error: boom", MODULE), None);
+    }
+
+    #[test]
+    fn parses_frames_whose_path_has_parentheses() {
         assert_eq!(
-            frame("    at <anonymous> (fettle:12:5)"),
-            Some(("fettle", 12, 5))
+            position(
+                "    at <anonymous> (/home/me/infra (old)/fettle.ts:1:22)",
+                "/home/me/infra (old)/fettle.ts"
+            ),
+            Some((1, 22))
         );
-        assert_eq!(frame("Error: boom"), None);
+    }
+
+    #[test]
+    fn parses_frames_whose_name_has_parentheses() {
+        assert_eq!(
+            position("    at role (web) (/abs/fettle.ts:3:2)", MODULE),
+            Some((3, 2))
+        );
     }
 
     #[test]

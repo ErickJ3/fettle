@@ -8,7 +8,7 @@ use oxc::semantic::SemanticBuilder;
 use oxc::span::{LabeledSpan, SourceType};
 use oxc::transformer::{TransformOptions, Transformer};
 
-use super::error::{Error, Location, SourceMap};
+use super::error::{Error, ErrorKind, Location, SourceMap};
 
 /// The only module `fettle.ts` can import.
 pub(crate) const FETTLE_MODULE: &str = "fettle";
@@ -26,18 +26,34 @@ pub(crate) fn strip(path: &Path, source: &str) -> Result<Script, Error> {
     if let Some(diagnostic) = parsed.diagnostics.first() {
         return Err(diagnostic_error(path, source, diagnostic));
     }
-    if let Some((specifier, offset)) = parsed
+    let static_imports = parsed
         .module_record
         .requested_modules
         .iter()
         .filter(|(specifier, _)| specifier.as_str() != FETTLE_MODULE)
-        .flat_map(|(specifier, requests)| requests.iter().map(move |r| (specifier, r.span.start)))
-        .min_by_key(|(_, offset)| *offset)
+        .flat_map(|(specifier, requests)| {
+            requests.iter().map(move |r| {
+                (
+                    r.span.start,
+                    format!(
+                        "cannot import \"{specifier}\": fettle.ts can only import \"{FETTLE_MODULE}\""
+                    ),
+                )
+            })
+        });
+    let dynamic_imports = parsed.module_record.dynamic_imports.iter().map(|import| {
+        (
+            import.span.start,
+            format!(
+                "cannot use import(): fettle.ts can only import \"{FETTLE_MODULE}\", statically"
+            ),
+        )
+    });
+    if let Some((offset, message)) = static_imports
+        .chain(dynamic_imports)
+        .min_by_key(|(offset, _)| *offset)
     {
-        return Err(Error::new(
-            at(offset),
-            format!("cannot import \"{specifier}\": fettle.ts can only import \"{FETTLE_MODULE}\""),
-        ));
+        return Err(Error::new(ErrorKind::Syntax, at(offset), message));
     }
 
     let mut program = parsed.program;
@@ -88,7 +104,7 @@ fn diagnostic_error(path: &Path, source: &str, diagnostic: &OxcDiagnostic) -> Er
         .map(LabeledSpan::offset)
         .min()
         .map(|offset| location(path, source, offset));
-    Error::new(location, diagnostic.message.to_string())
+    Error::new(ErrorKind::Syntax, location, diagnostic.message.to_string())
 }
 
 fn location(path: &Path, source: &str, offset: u32) -> Location {
@@ -97,7 +113,7 @@ fn location(path: &Path, source: &str, offset: u32) -> Location {
     Location {
         file: path.to_path_buf(),
         line: count(before.matches('\n').count()) + 1,
-        column: count(before[line_start..].chars().count()) + 1,
+        column: count(before[line_start..].encode_utf16().count()) + 1,
     }
 }
 
@@ -153,6 +169,23 @@ mod tests {
             .err()
             .unwrap();
         assert!(error.message.contains("./roles"), "{error}");
+        assert_eq!(error.location.unwrap().line, 2);
+    }
+
+    #[test]
+    fn syntax_error_column_counts_utf16_units() {
+        let error = strip_source("const s = \"😀\"; const = 1;\n")
+            .err()
+            .unwrap();
+        assert_eq!(error.location.unwrap().column, 23);
+    }
+
+    #[test]
+    fn rejects_dynamic_imports() {
+        let error = strip_source("import { host } from \"fettle\";\nimport(\"./roles\");\n")
+            .err()
+            .unwrap();
+        assert!(error.message.contains("import()"), "{error}");
         assert_eq!(error.location.unwrap().line, 2);
     }
 }

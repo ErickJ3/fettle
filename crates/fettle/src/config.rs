@@ -14,7 +14,7 @@ use rquickjs::{
 };
 use serde::Deserialize;
 
-pub use error::{Error, Location};
+pub use error::{Error, ErrorKind, Location};
 use error::{SourceMap, locate};
 use script::FETTLE_MODULE;
 
@@ -25,9 +25,8 @@ const STATE_GLOBAL: &str = "__fettle";
 ///
 /// Not `Send`: build catalogs on the thread that loaded the config.
 pub struct Config {
-    hosts: Vec<Host>,
-    callbacks: Vec<Persistent<Function<'static>>>,
-    host_stacks: Vec<String>,
+    // Invariant: `registrations[i].host.index == i`.
+    registrations: Vec<Registration>,
     state: Persistent<Object<'static>>,
     file: PathBuf,
     module: String,
@@ -37,11 +36,35 @@ pub struct Config {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Host {
-    pub name: String,
-    /// SSH destination, the host name unless the `ssh` option replaces it.
-    pub ssh: String,
-    pub tags: Vec<String>,
+    name: String,
+    ssh: String,
+    tags: Vec<String>,
     index: usize,
+}
+
+impl Host {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// SSH destination, the host name unless the `ssh` option replaces it.
+    #[must_use]
+    pub fn ssh(&self) -> &str {
+        &self.ssh
+    }
+
+    #[must_use]
+    pub fn tags(&self) -> &[String] {
+        &self.tags
+    }
+}
+
+/// A host with its callback and the stack of its declaration.
+struct Registration {
+    host: Host,
+    callback: Persistent<Function<'static>>,
+    stack: String,
 }
 
 #[derive(Deserialize)]
@@ -63,7 +86,7 @@ impl Js<'_> {
     }
 
     fn error(&self, stack: &str, message: impl Into<String>) -> Error {
-        Error::new(self.location(stack), message)
+        Error::new(ErrorKind::Script, self.location(stack), message)
     }
 
     fn caught(&self, caught: CaughtError<'_>) -> Error {
@@ -72,9 +95,21 @@ impl Js<'_> {
                 &exception.stack().unwrap_or_default(),
                 exception.message().unwrap_or_default(),
             ),
-            CaughtError::Value(value) => Error::new(None, format!("uncaught {}", describe(&value))),
-            CaughtError::Error(error) => Error::new(None, error.to_string()),
+            CaughtError::Value(value) => Error::new(
+                ErrorKind::Script,
+                None,
+                format!("uncaught {}", describe(&value)),
+            ),
+            CaughtError::Error(error) => engine_error(error),
         }
+    }
+
+    /// Like [`Js::caught`], falling back to the declaration at `stack` for a throw that has no
+    /// location of its own, such as a thrown string or one from `JSON.stringify` itself.
+    fn caught_at(&self, caught: CaughtError<'_>, stack: &str) -> Error {
+        let mut error = self.caught(caught);
+        error.location = error.location.or_else(|| self.location(stack));
+        error
     }
 }
 
@@ -83,14 +118,33 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// Fails when the file cannot be read, has a syntax error, imports a module other than
-    /// `"fettle"`, throws at the top level, never finishes, or registers an invalid host.
-    pub fn load(path: &Path) -> Result<Self, Error> {
-        let source = std::fs::read_to_string(path)
-            .map_err(|e| Error::new(None, format!("cannot read {}: {e}", path.display())))?;
+    /// - [`ErrorKind::Io`]: the file cannot be read or resolved.
+    /// - [`ErrorKind::Syntax`]: it is not valid TypeScript, imports a module other than
+    ///   `"fettle"` or uses `import()`.
+    /// - [`ErrorKind::Script`]: it throws at the top level, never finishes, or registers an
+    ///   invalid host.
+    /// - [`ErrorKind::Engine`]: the JavaScript engine fails.
+    pub fn load(path: impl Into<PathBuf>) -> Result<Self, Error> {
+        let file = path.into();
+        let path = file.as_path();
+        let source = std::fs::read_to_string(path).map_err(|e| {
+            Error::new(
+                ErrorKind::Io,
+                None,
+                format!("cannot read {}", path.display()),
+            )
+            .caused_by(e)
+        })?;
         let script = script::strip(path, &source)?;
         let module = std::fs::canonicalize(path)
-            .map_err(|e| Error::new(None, format!("cannot resolve {}: {e}", path.display())))?
+            .map_err(|e| {
+                Error::new(
+                    ErrorKind::Io,
+                    None,
+                    format!("cannot resolve {}", path.display()),
+                )
+                .caused_by(e)
+            })?
             .to_string_lossy()
             .into_owned();
         let base = path.parent().unwrap_or(Path::new("")).to_path_buf();
@@ -107,7 +161,7 @@ impl Config {
             map: &script.map,
         };
 
-        let (state, registered) = context.with(|ctx| -> Result<_, Error> {
+        let (state, registrations) = context.with(|ctx| -> Result<_, Error> {
             let state = new_state(&ctx, base).map_err(engine_error)?;
             ctx.globals()
                 .set(STATE_GLOBAL, state.clone())
@@ -119,6 +173,7 @@ impl Config {
                 Ok(()) => {}
                 Err(CaughtError::Error(rquickjs::Error::WouldBlock)) => {
                     return Err(Error::new(
+                        ErrorKind::Script,
                         None,
                         format!(
                             "{}: evaluation never finishes: a top-level await never settles",
@@ -128,17 +183,14 @@ impl Config {
                 }
                 Err(caught) => return Err(js.caught(caught)),
             }
-            let registered = register_hosts(&ctx, &js, &state)?;
-            Ok((Persistent::save(&ctx, state), registered))
+            let registrations = register_hosts(&ctx, &js, &state)?;
+            Ok((Persistent::save(&ctx, state), registrations))
         })?;
 
-        let (hosts, callbacks, host_stacks) = registered;
         Ok(Self {
-            hosts,
-            callbacks,
-            host_stacks,
+            registrations,
             state,
-            file: path.to_path_buf(),
+            file,
             module,
             map: script.map,
             context,
@@ -146,18 +198,22 @@ impl Config {
     }
 
     /// Registered hosts, in registration order.
-    #[must_use]
-    pub fn hosts(&self) -> &[Host] {
-        &self.hosts
+    pub fn hosts(&self) -> impl ExactSizeIterator<Item = &Host> {
+        self.registrations
+            .iter()
+            .map(|registration| &registration.host)
     }
 
     /// Runs the callback of `host`, one of [`Config::hosts`], with its facts.
     ///
     /// # Errors
     ///
-    /// Fails when the callback throws, returns a thenable, declares an invalid resource or
-    /// declares two different resources with the same identity.
+    /// - [`ErrorKind::UnknownHost`]: `host` is not one of [`Config::hosts`].
+    /// - [`ErrorKind::Script`]: the callback throws, returns a thenable, declares an invalid
+    ///   resource or declares two different resources with the same identity.
+    /// - [`ErrorKind::Engine`]: the JavaScript engine fails.
     pub fn catalog(&self, host: &Host, facts: &Facts) -> Result<Catalog, Error> {
+        let registration = self.registration(host)?;
         let js = Js {
             file: &self.file,
             module: &self.module,
@@ -170,45 +226,59 @@ impl Config {
                 state
                     .set("current", declared.clone())
                     .map_err(engine_error)?;
-                let returned = self.run_callback(&ctx, &js, host, facts);
+                let returned = run_callback(&ctx, &js, registration, facts);
                 state
                     .set("current", Value::new_null(ctx.clone()))
                     .map_err(engine_error)?;
-                if is_thenable(&returned?) {
+                let thenable = is_thenable(&returned?)
+                    .catch(&ctx)
+                    .map_err(|e| js.caught_at(e, &registration.stack))?;
+                if thenable {
                     return Err(Error::new(
-                        js.location(&self.host_stacks[host.index]),
+                        ErrorKind::Script,
+                        js.location(&registration.stack),
                         "the callback must be synchronous, but it returned a promise",
                     ));
                 }
                 build_catalog(&ctx, &js, &declared)
             })
-            .map_err(|e| Error {
-                message: format!("host \"{}\": {}", host.name, e.message),
-                ..e
-            })
+            .map_err(|e| e.prefixed(&format!("host \"{}\"", host.name)))
     }
 
-    fn run_callback<'js>(
-        &self,
-        ctx: &Ctx<'js>,
-        js: &Js<'_>,
-        host: &Host,
-        facts: &Facts,
-    ) -> Result<Value<'js>, Error> {
-        let callback = self.callbacks[host.index]
-            .clone()
-            .restore(ctx)
-            .map_err(engine_error)?;
-        let facts = serde_json::to_string(facts).map_err(|e| Error::new(None, e.to_string()))?;
-        let facts = ctx.json_parse(facts).map_err(engine_error)?;
-        callback
-            .call::<_, Value>((facts,))
-            .catch(ctx)
-            .map_err(|e| js.caught(e))
+    fn registration(&self, host: &Host) -> Result<&Registration, Error> {
+        self.registrations
+            .get(host.index)
+            .filter(|registration| registration.host == *host)
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::UnknownHost,
+                    None,
+                    format!("host \"{}\" is not registered by this config", host.name),
+                )
+            })
     }
 }
 
-type Registered = (Vec<Host>, Vec<Persistent<Function<'static>>>, Vec<String>);
+fn run_callback<'js>(
+    ctx: &Ctx<'js>,
+    js: &Js<'_>,
+    registration: &Registration,
+    facts: &Facts,
+) -> Result<Value<'js>, Error> {
+    let callback = registration
+        .callback
+        .clone()
+        .restore(ctx)
+        .map_err(engine_error)?;
+    let facts = serde_json::to_string(facts).map_err(|e| {
+        Error::new(ErrorKind::Engine, None, "cannot convert the facts to JSON").caused_by(e)
+    })?;
+    let facts = ctx.json_parse(facts).map_err(engine_error)?;
+    callback
+        .call::<_, Value>((facts,))
+        .catch(ctx)
+        .map_err(|e| js.caught_at(e, &registration.stack))
+}
 
 fn new_state<'js>(ctx: &Ctx<'js>, base: PathBuf) -> rquickjs::Result<Object<'js>> {
     let state = Object::new(ctx.clone())?;
@@ -238,9 +308,9 @@ fn register_hosts<'js>(
     ctx: &Ctx<'js>,
     js: &Js<'_>,
     state: &Object<'js>,
-) -> Result<Registered, Error> {
+) -> Result<Vec<Registration>, Error> {
     let entries: Vec<Array<'js>> = state.get("hosts").map_err(engine_error)?;
-    let (mut hosts, mut callbacks, mut stacks) = (Vec::new(), Vec::new(), Vec::<String>::new());
+    let mut registrations: Vec<Registration> = Vec::new();
     for entry in entries {
         let stack: String = entry.get(3).map_err(engine_error)?;
         let name = entry
@@ -257,27 +327,31 @@ fn register_hosts<'js>(
             .map_err(engine_error)?
             .into_function()
             .ok_or_else(|| js.error(&stack, format!("host \"{name}\" needs a callback")))?;
-        let options: HostOptions = from_js(ctx, entry.get(1).map_err(engine_error)?)
+        let options = to_json(ctx, js, &stack, entry.get(1).map_err(engine_error)?)
+            .map_err(|e| e.prefixed(&format!("host \"{name}\"")))?;
+        let options: HostOptions = serde_path_to_error::deserialize(options)
             .map_err(|e| js.error(&stack, format!("host \"{name}\": {}", field_error(&e))))?;
-        if let Some(first) = hosts.iter().position(|h: &Host| h.name == name) {
+        if let Some(first) = registrations.iter().find(|r| r.host.name == name) {
             return Err(js.error(
                 &stack,
                 format!(
                     "host \"{name}\" is declared twice, first at {}",
-                    describe_location(js, &stacks[first])
+                    describe_location(js, &first.stack)
                 ),
             ));
         }
-        hosts.push(Host {
-            ssh: options.ssh.unwrap_or_else(|| name.clone()),
-            tags: options.tags.unwrap_or_default(),
-            name,
-            index: callbacks.len(),
+        registrations.push(Registration {
+            host: Host {
+                ssh: options.ssh.unwrap_or_else(|| name.clone()),
+                tags: options.tags.unwrap_or_default(),
+                name,
+                index: registrations.len(),
+            },
+            callback: Persistent::save(ctx, callback),
+            stack,
         });
-        callbacks.push(Persistent::save(ctx, callback));
-        stacks.push(stack);
     }
-    Ok((hosts, callbacks, stacks))
+    Ok(registrations)
 }
 
 fn build_catalog<'js>(
@@ -291,16 +365,17 @@ fn build_catalog<'js>(
         let entry = entry.map_err(engine_error)?;
         let kind: String = entry.get(0).map_err(engine_error)?;
         let stack: String = entry.get(3).map_err(engine_error)?;
-        let ids = ids(&entry.get(1).map_err(engine_error)?).ok_or_else(|| {
-            js.error(
-                &stack,
-                format!("{kind}: the id must be a non-empty string or a list of them"),
-            )
-        })?;
-        let props = match entry.get::<Value>(2).map_err(engine_error)? {
-            props if props.is_undefined() => serde_json::json!({}),
-            props => to_json(ctx, props)?,
-        };
+        let ids = ids(&entry.get(1).map_err(engine_error)?)
+            .catch(ctx)
+            .map_err(|e| js.caught_at(e, &stack))?
+            .ok_or_else(|| {
+                js.error(
+                    &stack,
+                    format!("{kind}: the id must be a non-empty string or a list of them"),
+                )
+            })?;
+        let props = to_json(ctx, js, &stack, entry.get(2).map_err(engine_error)?)
+            .map_err(|e| e.prefixed(&kind))?;
         for id in ids {
             let desired: Desired = serde_path_to_error::deserialize(
                 serde_json::json!({ "kind": kind, "props": props }),
@@ -330,42 +405,39 @@ fn build_catalog<'js>(
 }
 
 /// A non-empty string is one id and a list of them is each; anything else is `None`.
-fn ids(value: &Value<'_>) -> Option<Vec<String>> {
+fn ids(value: &Value<'_>) -> rquickjs::Result<Option<Vec<String>>> {
     match value.as_array() {
-        Some(list) => list
-            .iter::<Value>()
-            .map(|id| id.ok().as_ref().and_then(id_string))
-            .collect(),
-        None => id_string(value).map(|id| vec![id]),
+        Some(list) => list.iter::<Value>().map(|id| id_string(&id?)).collect(),
+        None => Ok(id_string(value)?.map(|id| vec![id])),
     }
 }
 
-fn id_string(value: &Value<'_>) -> Option<String> {
-    value
-        .as_string()?
-        .to_string()
-        .ok()
-        .filter(|id| !id.is_empty())
+fn id_string(value: &Value<'_>) -> rquickjs::Result<Option<String>> {
+    let id = value
+        .as_string()
+        .map(rquickjs::String::to_string)
+        .transpose()?;
+    Ok(id.filter(|id| !id.is_empty()))
 }
 
-fn from_js<'js, T: serde::de::DeserializeOwned>(
+/// Converts the options or props of the declaration at `stack`, `undefined` meaning none.
+fn to_json<'js>(
     ctx: &Ctx<'js>,
+    js: &Js<'_>,
+    stack: &str,
     value: Value<'js>,
-) -> Result<T, serde_path_to_error::Error<serde_json::Error>> {
-    let json = if value.is_undefined() {
-        serde_json::json!({})
-    } else {
-        to_json(ctx, value).unwrap_or(serde_json::Value::Null)
+) -> Result<serde_json::Value, Error> {
+    if value.is_undefined() {
+        return Ok(serde_json::json!({}));
+    }
+    let json = match ctx.json_stringify(value).catch(ctx) {
+        Ok(Some(json)) => json.to_string().map_err(engine_error)?,
+        Ok(None) => return Ok(serde_json::Value::Null),
+        Err(caught) => return Err(js.caught_at(caught, stack)),
     };
-    serde_path_to_error::deserialize(json)
-}
-
-fn to_json<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Result<serde_json::Value, Error> {
-    let Some(json) = ctx.json_stringify(value).map_err(engine_error)? else {
-        return Ok(serde_json::Value::Null);
-    };
-    let json = json.to_string().map_err(engine_error)?;
-    serde_json::from_str(&json).map_err(|e| Error::new(None, e.to_string()))
+    serde_json::from_str(&json).map_err(|e| {
+        Error::new(ErrorKind::Engine, None, "the engine produced invalid JSON").caused_by(e)
+    })
 }
 
 /// Names the failing field without the `props.` prefix of a resource declaration.
@@ -391,14 +463,13 @@ fn describe(value: &Value<'_>) -> String {
         .map_or_else(|| format!("{:?}", value.type_of()), |s| format!("\"{s}\""))
 }
 
-fn is_thenable(value: &Value<'_>) -> bool {
-    value
-        .as_object()
-        .and_then(|object| object.get::<_, Value>("then").ok())
-        .is_some_and(|then| then.is_function())
+fn is_thenable(value: &Value<'_>) -> rquickjs::Result<bool> {
+    match value.as_object() {
+        Some(object) => Ok(object.get::<_, Value>("then")?.is_function()),
+        None => Ok(false),
+    }
 }
 
-#[expect(clippy::needless_pass_by_value, reason = "passed to `map_err`")]
 fn engine_error(error: rquickjs::Error) -> Error {
-    Error::new(None, format!("JavaScript engine error: {error}"))
+    Error::new(ErrorKind::Engine, None, "JavaScript engine error").caused_by(error)
 }
