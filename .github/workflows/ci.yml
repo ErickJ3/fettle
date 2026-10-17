@@ -38,6 +38,11 @@ jobs:
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo test --workspace --locked
+      - name: pkg host tests as root
+        run: cargo test -p fettle-agent --test pkg --locked
+        env:
+          FETTLE_TEST_APT: "1"
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -E
 
   deny:
     runs-on: ubuntu-latest

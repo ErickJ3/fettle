@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use fettle::config::{Config, Error, ErrorKind, Host};
-use fettle_protocol::{Catalog, Desired, Facts, Os, Pkg, Resource, Service, User};
+use fettle_protocol::{Catalog, Desired, Facts, File, Os, Pkg, Resource, Service, User};
 use tempfile::TempDir;
 
 struct Loaded {
@@ -675,6 +675,50 @@ fn service_props_round_trip() {
         catalog[0].desired,
         Desired::Service(Service {
             enabled: Some(true)
+        })
+    );
+}
+
+#[test]
+fn relative_file_path() {
+    let error = catalog_error(
+        "import { host, file } from \"fettle\";\nhost(\"nas\", () => {\n  file(\"etc/motd\", { content: \"hi\" });\n});\n",
+        "nas",
+    );
+    assert_at(&error, 3);
+    assert_mentions(&error, &["file etc/motd", "absolute path"]);
+}
+
+#[test]
+fn absolute_file_path() {
+    let catalog = catalog_of(
+        "import { host, file } from \"fettle\";\nhost(\"nas\", () => file(\"/etc/motd\", { content: \"hi\" }));\n",
+        "nas",
+    )
+    .unwrap();
+    assert_eq!(
+        catalog,
+        [Resource {
+            id: "/etc/motd".to_owned(),
+            desired: Desired::File(File::Present {
+                content: "hi".to_owned()
+            }),
+        }]
+    );
+}
+
+#[test]
+fn path_like_content_is_text() {
+    let loaded = load_with(
+        &[("motd.txt", "from the operator's machine\n")],
+        "import { host, file } from \"fettle\";\nhost(\"nas\", () => file(\"/etc/motd\", { content: \"./motd.txt\" }));\n",
+    );
+    let config = loaded.result.unwrap();
+    let catalog = config.catalog(first_host(&config), &debian()).unwrap();
+    assert_eq!(
+        catalog[0].desired,
+        Desired::File(File::Present {
+            content: "./motd.txt".to_owned()
         })
     );
 }

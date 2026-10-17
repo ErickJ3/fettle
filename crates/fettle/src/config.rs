@@ -381,6 +381,13 @@ fn build_catalog<'js>(
                 serde_json::json!({ "kind": kind, "props": props }),
             )
             .map_err(|e| js.error(&stack, format!("{kind} {id}: {}", field_error(&e))))?;
+            // A relative path would land in the SSH user's home on the target.
+            if matches!(desired, Desired::File(_)) && !id.starts_with('/') {
+                return Err(js.error(
+                    &stack,
+                    format!("{kind} {id}: the id must be an absolute path"),
+                ));
+            }
             let resource = Resource { id, desired };
             match catalog.iter().position(|r| r.key() == resource.key()) {
                 Some(first) if catalog[first] == resource => {}

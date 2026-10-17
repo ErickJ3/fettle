@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use fettle_protocol::Action;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -6,7 +8,22 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + S
 
 /// Host context passed to the operations that touch the host.
 #[derive(Debug, Default)]
-pub struct Ctx {}
+pub struct Ctx {
+    package_lists_fresh: AtomicBool,
+}
+
+impl Ctx {
+    /// Runs `refresh` unless an earlier call in this run succeeded, so a failed refresh is
+    /// retried by the next install.
+    pub(crate) fn refresh_package_lists(&self, refresh: impl FnOnce() -> Result<()>) -> Result<()> {
+        if self.package_lists_fresh.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        refresh()?;
+        self.package_lists_fresh.store(true, Ordering::Release);
+        Ok(())
+    }
+}
 
 /// One step from the state read to the desired state.
 ///
@@ -89,4 +106,50 @@ impl<R: Resource> AnyResource for R {
 
 fn typed<T: DeserializeOwned>(value: &Value) -> serde_json::Result<T> {
     T::deserialize(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::*;
+
+    #[test]
+    fn package_lists_refresh_once_after_success() {
+        let ctx = Ctx::default();
+        let runs = Cell::new(0);
+        let refresh = || {
+            runs.set(runs.get() + 1);
+            Ok(())
+        };
+
+        ctx.refresh_package_lists(refresh).unwrap();
+        ctx.refresh_package_lists(refresh).unwrap();
+
+        assert_eq!(runs.get(), 1);
+    }
+
+    #[test]
+    fn failed_refresh_is_retried() {
+        let ctx = Ctx::default();
+        let runs = Cell::new(0);
+
+        let error = ctx.refresh_package_lists(|| {
+            runs.set(runs.get() + 1);
+            Err("mirror down".into())
+        });
+        assert!(error.is_err());
+        ctx.refresh_package_lists(|| {
+            runs.set(runs.get() + 1);
+            Ok(())
+        })
+        .unwrap();
+        ctx.refresh_package_lists(|| {
+            runs.set(runs.get() + 1);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(runs.get(), 2);
+    }
 }
