@@ -260,11 +260,19 @@ async fn run(
         .spawn()
         .await
         .map_err(|e| chain(&e))?;
-    if let Some(input) = input {
-        let mut stdin = child.stdin().take().expect("piped stdin");
-        stdin.write_all(input).await.map_err(|e| e.to_string())?;
-        stdin.shutdown().await.map_err(|e| e.to_string())?;
-    }
+    let written = match input {
+        Some(input) => {
+            let mut stdin = child.stdin().take().expect("piped stdin");
+            async {
+                stdin.write_all(input).await?;
+                stdin.shutdown().await
+            }
+            .await
+        }
+        None => Ok(()),
+    };
+    // A command that fails early breaks the pipe; its status and stderr say why, the write
+    // error does not.
     let output = child.wait_with_output().await.map_err(|e| chain(&e))?;
     if !output.status.success() {
         return Err(format!(
@@ -273,6 +281,7 @@ async fn run(
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
+    written.map_err(|e| e.to_string())?;
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
