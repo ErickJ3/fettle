@@ -29,6 +29,10 @@ const CONTROL_PERSIST_SECONDS: NonZeroUsize = NonZeroUsize::new(5).unwrap();
 /// the value is a guess generous enough for slow links.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Probes an idle connection so a link that dropped silently fails the waits on the agent
+/// instead of hanging them; ssh gives up after three unanswered probes.
+const SERVER_ALIVE_INTERVAL: Duration = Duration::from_secs(15);
+
 /// A failure on one host.
 ///
 /// `message` leaves out the [`source`](std::error::Error::source), so report the whole chain:
@@ -125,6 +129,7 @@ impl Session {
         let ssh = SessionBuilder::default()
             .control_persist(ControlPersist::IdleFor(CONTROL_PERSIST_SECONDS))
             .connect_timeout(CONNECT_TIMEOUT)
+            .server_alive_interval(SERVER_ALIVE_INTERVAL)
             .connect(&destination)
             .await
             .map_err(|e| fail(ErrorKind::Ssh, "cannot connect").caused_by(e))?;
