@@ -5,7 +5,7 @@ mod script;
 
 use std::path::{Path, PathBuf};
 
-use fettle_protocol::{Catalog, Desired, Facts, Resource};
+use fettle_protocol::{Catalog, Desired, Facts, Resource, User};
 use rquickjs::convert::List;
 use rquickjs::loader::{BuiltinLoader, BuiltinResolver};
 use rquickjs::{
@@ -388,6 +388,17 @@ fn build_catalog<'js>(
                     format!("{kind} {id}: the id must be an absolute path"),
                 ));
             }
+            if let Desired::User(User {
+                ssh_keys: Some(keys),
+                ..
+            }) = &desired
+                && let Some(i) = keys.iter().position(|key| !is_public_key_line(key))
+            {
+                return Err(js.error(
+                    &stack,
+                    format!("{kind} {id}: sshKeys[{i}] is not an SSH public key line"),
+                ));
+            }
             let resource = Resource { id, desired };
             match catalog.iter().position(|r| r.key() == resource.key()) {
                 Some(first) if catalog[first] == resource => {}
@@ -409,6 +420,25 @@ fn build_catalog<'js>(
         }
     }
     Ok(catalog)
+}
+
+/// One OpenSSH public key line, so a path or a second line never reaches `authorized_keys`.
+/// `authorized_keys` options are rejected too: they grant restricted logins nobody reviews as keys.
+fn is_public_key_line(key: &str) -> bool {
+    let line = key.strip_suffix('\n').unwrap_or(key);
+    if line.contains(['\n', '\r']) {
+        return false;
+    }
+    let mut tokens = line.split_whitespace();
+    let key_type = tokens.next().unwrap_or_default();
+    let blob = tokens.next().unwrap_or_default();
+    ["ssh-", "ecdsa-sha2-", "sk-"]
+        .iter()
+        .any(|prefix| key_type.starts_with(prefix))
+        && !blob.is_empty()
+        && blob
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "+/=".contains(c))
 }
 
 /// A non-empty string is one id and a list of them is each; anything else is `None`.

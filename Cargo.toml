@@ -20,6 +20,7 @@ openssh = "0.11"
 tokio = { version = "1", features = ["io-util", "macros", "rt"] }
 sha2 = "0.11"
 similar = "2"
+rustix = { version = "1", features = ["fs"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

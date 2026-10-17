@@ -98,12 +98,12 @@ fn already_absent() {
     assert_eq!(Resource::diff(&absent("snapd"), None), []);
 }
 
-/// `None` unless `FETTLE_TEST_APT` is set; set without root it panics, so a misconfigured CI
+/// `None` unless `FETTLE_TEST_HOST` is set; set without root it panics, so a misconfigured CI
 /// step fails instead of passing empty.
 fn apt_host() -> Option<MutexGuard<'static, ()>> {
-    std::env::var_os("FETTLE_TEST_APT")?;
+    std::env::var_os("FETTLE_TEST_HOST")?;
     let uid = fs::metadata("/proc/self").map(|m| m.uid());
-    assert_eq!(uid.ok(), Some(0), "FETTLE_TEST_APT needs root");
+    assert_eq!(uid.ok(), Some(0), "FETTLE_TEST_HOST needs root");
     Some(APT.lock().unwrap_or_else(PoisonError::into_inner))
 }
 

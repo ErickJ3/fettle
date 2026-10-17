@@ -601,7 +601,7 @@ host("nas", (h: Facts): void => {
 #[test]
 fn ssh_key_from_a_local_file() {
     let loaded = load_with(
-        &[("marcos.pub", "ssh-ed25519 AAAA marcos\n")],
+        &[("marcos.pub", "ssh-ed25519 AAAAC3Nza marcos@laptop\n")],
         r#"import { host, read, user } from "fettle";
 host("nas", () => {
   user("marcos", { sshKeys: [read("./marcos.pub")] });
@@ -616,9 +616,32 @@ host("nas", () => {
             id: "marcos".to_owned(),
             desired: Desired::User(User {
                 groups: None,
-                ssh_keys: Some(vec!["ssh-ed25519 AAAA marcos\n".to_owned()]),
+                ssh_keys: Some(vec!["ssh-ed25519 AAAAC3Nza marcos@laptop\n".to_owned()]),
             }),
         }]
+    );
+}
+
+#[test]
+fn two_ssh_keys_in_one_entry() {
+    let error = catalog_error(
+        "import { host, user } from \"fettle\";\nhost(\"nas\", () => {\n  user(\"marcos\", { sshKeys: [\"ssh-ed25519 AAAA a\\nssh-ed25519 BBBB b\"] });\n});\n",
+        "nas",
+    );
+    assert_at(&error, 3);
+    assert_mentions(&error, &["user marcos", "sshKeys[0]"]);
+}
+
+#[test]
+fn ssh_key_path_is_not_read_locally() {
+    let error = catalog_error(
+        "import { host, user } from \"fettle\";\nhost(\"nas\", () => {\n  user(\"marcos\", { sshKeys: [\"ssh-ed25519 AAAA a\", \"~/.ssh/id_ed25519.pub\"] });\n});\n",
+        "nas",
+    );
+    assert_at(&error, 3);
+    assert_mentions(
+        &error,
+        &["user marcos", "sshKeys[1]", "not an SSH public key line"],
     );
 }
 
