@@ -13,6 +13,17 @@ cargo deny check
 
 All four run in CI and must pass before a change is done.
 
+### Agent build
+
+The agent ships as one static musl binary per architecture. Building it needs [zig](https://ziglang.org) and `cargo install --locked cargo-zigbuild`:
+
+```sh
+cargo zigbuild -p fettle-agent --release --locked --target x86_64-unknown-linux-musl
+cargo zigbuild -p fettle-agent --release --locked --target aarch64-unknown-linux-musl
+```
+
+Binaries land in `target/<triple>/release/fettle-agent`. These are not required locally: the `agent` CI job builds both and checks that they are static and run on stock Debian and Ubuntu.
+
 ## Crates
 
 - `crates/fettle`: the CLI. Evaluates `fettle.ts`, opens SSH connections, prints plans.
