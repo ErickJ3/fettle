@@ -86,8 +86,9 @@ pub(crate) fn locate(stack: &str, module: &str, map: &SourceMap, file: &Path) ->
 /// Parses `at name (file:line:column)` or `at file:line:column`.
 fn frame(line: &str) -> Option<(&str, u32, u32)> {
     let rest = line.trim().strip_prefix("at ")?;
-    let position = match rest.rfind('(') {
-        Some(open) if rest.ends_with(')') => &rest[open + 1..rest.len() - 1],
+    // The first ` (` ends the function name; the file path after it may hold parentheses too.
+    let position = match rest.find(" (") {
+        Some(open) if rest.ends_with(')') => &rest[open + 2..rest.len() - 1],
         _ => rest,
     };
     let mut parts = position.rsplitn(3, ':');
@@ -122,6 +123,14 @@ mod tests {
             Some(("fettle", 12, 5))
         );
         assert_eq!(frame("Error: boom"), None);
+    }
+
+    #[test]
+    fn parses_frames_whose_path_has_parentheses() {
+        assert_eq!(
+            frame("    at <anonymous> (/home/me/infra (old)/fettle.ts:1:22)"),
+            Some(("/home/me/infra (old)/fettle.ts", 1, 22))
+        );
     }
 
     #[test]
